@@ -13,7 +13,7 @@ class SegmentRate:
     label: str
     T_mean_K: float
     T_span_K: float
-    r_abs: float  # |dm/dt|, same time units as input
+    r_abs: float  # |dm/dt|, same time units as input (Minutes for Netzsh data)
     slope_signed: float  # signed dm/dt from linear fit
     intercept: float  # intercept of mass vs time linear fit
     r2_mass_vs_time: float  # R^2 of linear fit for zero-order assumption
@@ -133,7 +133,6 @@ def estimate_arrhenius_from_segments(
         segments: Sequence[SegmentRate],
         *,
         R: float = R_DEFAULT,
-        enforce_non_negative: bool = True,
         min_points: int = 2,
 ) -> ArrheniusResult:
     T = np.array([s.T_mean_K for s in segments], dtype=float)
@@ -149,15 +148,6 @@ def estimate_arrhenius_from_segments(
     E_A = -slope * R
     A = float(math.exp(intercept)) if np.isfinite(intercept) else float("nan")
     raw = dict(E_A_raw=E_A, A_raw=A, slope_raw=slope, intercept_raw=intercept, r2_raw=r2)
-    if enforce_non_negative:
-        if not np.isfinite(A) or A < 0:
-            A = max(0.0, A if np.isfinite(A) else 0.0)
-        if not np.isfinite(E_A) or E_A < 0:
-            E_A = 0.0
-            A = float(math.exp(y.mean()))
-            slope = 0.0
-            intercept = float(y.mean())
-            r2 = 0.0
     extras = {
         "segments_used": [s.__dict__ for s in segments],
         "raw_fit": raw,

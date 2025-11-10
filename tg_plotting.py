@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from tg_math import estimate_arrhenius_from_segments, arrhenius_plot_data
+
 
 def _moving_average(y: np.ndarray, window: int) -> np.ndarray:
     window = max(1, int(window))
@@ -93,3 +95,113 @@ def plot_arrhenius(
     if show:
         plt.show()
     plt.close()
+
+def plot_arrhenius_groups(
+    groups,
+    *,
+    show: bool = False,
+    save_path: str | None = None,
+    title: str | None = None,
+    legend_loc: str = "best",
+):
+    """
+    Plot multiple Arrhenius datasets (ln(r) vs 1/T) on the same axes, with one
+    regression line per group. Each group is a list of SegmentRate objects for
+    the same product/condition (e.g., 3 isotherms per product).
+
+    Parameters
+    ----------
+    groups : Sequence
+        A sequence where each element is one of:
+          • {"label": str, "segments": [SegmentRate, ...]}
+          • (label: str, segments: [SegmentRate, ...])
+        (Anything with attributes/keys 'label' and 'segments' also works.)
+
+    show : bool, default False
+        If True, display the figure (matplotlib .show()).
+
+    save_path : str | None, default None
+        If provided, save the figure to this path (PNG/PDF/etc. based on extension).
+
+    title : str | None, default None
+        Optional plot title.
+
+    legend_loc : str, default "best"
+        Matplotlib legend location.
+
+    Returns
+    -------
+    list of dict
+        One entry per group with keys:
+          { "label", "Ea_J_per_mol", "Ea_kJ_per_mol", "A", "R2", "n_points" }
+
+    Notes
+    -----
+    • This function *calls* `tg_math` to compute the fit (keeps math out of plotting).
+    • No explicit colors are set; matplotlib will cycle defaults across groups.
+    • Units of A are the same time units used to compute r (your pipeline decides).
+    """
+
+    # Helper to coerce group item into (label, segments) tuple
+    def _coerce_group(g):
+        if isinstance(g, dict):
+            return g.get("label", "group"), g.get("segments", [])
+        if isinstance(g, (list, tuple)) and len(g) == 2:
+            return g[0], g[1]
+        # Fallback to attribute access
+        lab = getattr(g, "label", "group")
+        segs = getattr(g, "segments", [])
+        return lab, segs
+
+    results = []
+
+    plt.figure()
+
+    for g in groups:
+        label, segs = _coerce_group(g)
+
+        # Get x, y data for Arrhenius plot (x=1/T, y=ln r)
+        x, y = arrhenius_plot_data(segs)
+        if x.size < 2:
+            # Not enough points to fit a line; plot what we have and continue
+            if x.size > 0:
+                plt.plot(x, y, "o", label=f"{label} (insufficient points)")
+            results.append(
+                {"label": label, "Ea_J_per_mol": np.nan, "Ea_kJ_per_mol": np.nan, "A": np.nan, "R2": np.nan, "n_points": int(x.size)}
+            )
+            continue
+
+        # Math should stay in tg_math for readability
+        fit = estimate_arrhenius_from_segments(segs)
+        # Scatter through group
+        plt.plot(x, y, "o", label=f"{label} data")
+
+        # Plot the fitted line over this group's x-range
+        xx = np.linspace(x.min(), x.max(), 200)
+        yy = fit.intercept + fit.slope * xx
+        plt.plot(xx, yy, "-", label=f"{label} fit")
+
+        results.append(
+            {
+                "label": label,
+                "Ea_J_per_mol": fit.E_A_J_per_mol,
+                "Ea_kJ_per_mol": fit.E_A_J_per_mol / 1000.0 if np.isfinite(fit.E_A_J_per_mol) else np.nan,
+                "A": fit.A,
+                "R2": fit.r2_ln_r_vs_invT,
+                "n_points": fit.n_points,
+            }
+        )
+
+    plt.xlabel("1/T (1/K)")
+    plt.ylabel("ln(r)")
+    if title:
+        plt.title(title)
+    plt.legend(loc=legend_loc)
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close()
+
+    return results
