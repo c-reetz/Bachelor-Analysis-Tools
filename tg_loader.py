@@ -1,9 +1,10 @@
-from pathlib import Path
-from io import StringIO
-import pandas as pd
-from typing import Iterable, Union
 import re
+from io import StringIO
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
+from pandas import DataFrame
 
 HEADER_MARKER = "##Temp./°C;Time/min;Mass/%;Segment"
 
@@ -98,7 +99,7 @@ def _load_region_from_csv_text(text: str) -> pd.DataFrame:
     # Try decimal comma then dot
     for decimal in (",", "."):
         try:
-            df = pd.read_csv(buf, sep=";", decimal=decimal, engine="python")
+            df: DataFrame = pd.read_csv(buf, sep=";", decimal=decimal, engine="python")
             if not {"Temp./°C", "Time/min", "Mass/%", "Segment"}.issubset(df.columns):
                 raise ValueError("Parsed columns do not match expected header.")
             df["Temp./°C"] = pd.to_numeric(df["Temp./°C"], errors="coerce")
@@ -143,56 +144,3 @@ def load_thermogravimetric_data(path: str | Path) -> pd.DataFrame:
         return _load_region_from_csv_text(text)
 
     raise ValueError(f"Unsupported file type: {ext}")
-
-
-def load_many_thermogravimetric(
-        paths: Union[Iterable[Union[str, Path]], str],
-        *,
-        use_glob: bool = False,
-        as_dict: bool = False,
-        ignore_errors: bool = True
-):
-    """
-    Load multiple CSV/XLSX files into DataFrames.
-
-    paths:
-        - Iterable of paths (['a.csv','b.xlsx', ...]) OR
-        - A glob string (e.g. 'data/**/*.csv') with use_glob=True
-    use_glob:
-        If True, interpret `paths` as a single glob pattern.
-    as_dict:
-        If True, return a dict keyed by file stem; else a list in the same order.
-    ignore_errors:
-        If True, skip files that fail to parse; else raise.
-
-    Returns:
-        list[pd.DataFrame] or dict[str, pd.DataFrame]
-    """
-    if use_glob:
-        file_list = sorted(Path().glob(paths))
-    else:
-        file_list = [Path(p) for p in paths]
-
-    results_list = []
-    results_dict = {}
-
-    for p in file_list:
-        try:
-            df = load_thermogravimetric_data(p)
-            if as_dict:
-                key = p.stem
-                # If duplicate stems, make them unique
-                i, base = 1, key
-                while key in results_dict:
-                    i += 1
-                    key = f"{base}__{i}"
-                results_dict[key] = df
-            else:
-                results_list.append(df)
-        except Exception as e:
-            if ignore_errors:
-                print(f"[skip] {p}: {e}")
-                continue
-            raise
-
-    return results_dict if as_dict else results_list
