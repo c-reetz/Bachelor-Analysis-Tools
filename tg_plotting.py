@@ -205,3 +205,140 @@ def plot_arrhenius_groups(
     plt.close()
 
     return results
+
+def plot_coats_redfern_overlays(
+    results,
+    *,
+    title: str | None = None,
+    save_path: str | None = None,
+    show: bool = False,
+):
+    """
+    Overlay multiple Coats–Redfern datasets + fitted lines in one plot.
+
+    `results` is a list of objects returned by
+    tg_math.estimate_EA_A_nonisothermal_coats_redfern(...).
+    Each result must expose:
+        - x_invT
+        - y_ln_g_over_T2
+        - slope
+        - intercept
+        - r2
+        - E_A_J_per_mol
+        - A
+        - label (optional)
+        - n_solid (optional)
+    """
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    for res in results:
+        x = np.asarray(res.x_invT, dtype=float)
+        y = np.asarray(res.y_ln_g_over_T2, dtype=float)
+
+        m = np.isfinite(x) & np.isfinite(y)
+        x = x[m]
+        y = y[m]
+        if x.size < 2:
+            continue
+
+        # sort for nice lines
+        idx = np.argsort(x)
+        x = x[idx]
+        y = y[idx]
+
+        y_hat = res.intercept + res.slope * x
+
+        lab = getattr(res, "label", None) or "segment"
+        n_solid = getattr(res, "n_solid", None)
+        if n_solid is not None:
+            lab = f"{lab} (n={n_solid:g})"
+
+        Ea_kJ = float(res.E_A_J_per_mol) / 1000.0 if np.isfinite(res.E_A_J_per_mol) else float("nan")
+        A = float(res.A) if np.isfinite(res.A) else float("nan")
+        r2 = float(res.r2) if np.isfinite(res.r2) else float("nan")
+
+        ax.plot(x, y, "o", label=f"{lab} data")
+        ax.plot(x, y_hat, "-", label=f"{lab} fit: Ea={Ea_kJ:.1f} kJ/mol, A={A:.3g}, R²={r2:.3f}")
+
+    ax.set_xlabel("1/T [1/K]")
+    ax.set_ylabel("ln(g(w)/T²)")
+    ax.set_title(title or "Coats–Redfern overlays")
+    ax.legend()
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+def plot_coats_redfern_global(
+    res_global,
+    *,
+    title: str | None = None,
+    save_path: str | None = None,
+    show: bool = False,
+):
+    """
+    Plot the combined Coats–Redfern points (all datasets concatenated) and the single
+    global fitted line.
+
+    Expects `res_global` returned by estimate_EA_A_nonisothermal_coats_redfern_global(...)
+    and that it exposes:
+      - x_invT (1/K)
+      - y_ln_g_over_T2
+      - slope, intercept, r2
+      - E_A_J_per_mol, A
+      - beta_ref_K_per_time (optional)
+      - labels / dataset_point_counts (optional)
+
+    Saves to `save_path` if provided.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    x = np.asarray(res_global.x_invT, dtype=float)
+    y = np.asarray(res_global.y_ln_g_over_T2, dtype=float)
+
+    m = np.isfinite(x) & np.isfinite(y)
+    x = x[m]
+    y = y[m]
+    if x.size < 2:
+        raise ValueError("Not enough finite points to plot.")
+
+    # sort by x for a clean line
+    idx = np.argsort(x)
+    x = x[idx]
+    y = y[idx]
+
+    y_hat = res_global.intercept + res_global.slope * x
+
+    Ea_kJ = float(res_global.E_A_J_per_mol) / 1000.0
+    A = float(res_global.A)
+    r2 = float(res_global.r2)
+
+    beta_txt = ""
+    if hasattr(res_global, "beta_ref_K_per_time"):
+        beta_txt = f", β={float(res_global.beta_ref_K_per_time):g}"
+
+    n_txt = ""
+    if hasattr(res_global, "n_solid"):
+        n_txt = f" (n={float(res_global.n_solid):g})"
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(x, y, "o", label="All data (combined)")
+    ax.plot(x, y_hat, "-", label=f"Global fit: Ea={Ea_kJ:.2f} kJ/mol, A={A:.3g}, R²={r2:.4f}{beta_txt}")
+
+    ax.set_xlabel("1/T [1/K]")
+    ax.set_ylabel("ln(g(w)/T²)")
+    ax.set_title(title or f"Coats–Redfern global fit{n_txt}")
+    ax.legend()
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
