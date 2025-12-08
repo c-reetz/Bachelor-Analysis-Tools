@@ -342,3 +342,141 @@ def plot_coats_redfern_global(
         plt.show()
     plt.close(fig)
 
+def plot_global_coats_redfern_o2_fit(
+    res,
+    *,
+    title: str | None = None,
+    save_path: str | None = None,
+    show: bool = False,
+    make_corrected_plot: bool = True,
+    make_raw_plot: bool = True,
+    group_by_o2: bool = True,
+    o2_label_fmt: str = "{:.0f}% O2",
+):
+    """
+    Plot global Coats–Redfern O2 fit with consistent colours between raw and corrected plots.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    x = np.asarray(res.x_invT_all, dtype=float)
+    y = np.asarray(res.y_all, dtype=float)
+    z = np.asarray(res.z_lnO2_all, dtype=float)
+
+    msk = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    x, y, z = x[msk], y[msk], z[msk]
+    if x.size < 3:
+        raise ValueError("Not enough finite points to plot.")
+
+    base_title = title or (getattr(res, "label", None) or "Global Coats–Redfern O2 fit")
+    n_txt = f", n_solid={float(res.n_solid):g}" if hasattr(res, "n_solid") else ""
+
+    Ea_kJ = float(res.E_A_J_per_mol) / 1000.0
+    A_val = float(res.A)
+    r2 = float(res.r2)
+
+    # --- group by O2 (z = ln(yO2) constant per dataset) ---
+    if group_by_o2:
+        z_round = np.round(z, 12)
+        z_groups = np.unique(z_round)
+    else:
+        z_round = np.round(z, 12)
+        z_groups = np.array([float(np.nanmedian(z_round))], dtype=float)
+
+    def _label_for_z(z_val: float) -> str:
+        yO2 = float(np.exp(z_val))
+        return o2_label_fmt.format(100.0 * yO2)
+
+    # --- consistent color mapping across plots ---
+    # Sort groups by actual O2 fraction (low -> high) so colours are stable & intuitive
+    z_groups_sorted = sorted(z_groups, key=lambda zz: float(np.exp(zz)))
+    cmap = plt.get_cmap("tab10")
+    color_map = {zg: cmap(i % 10) for i, zg in enumerate(z_groups_sorted)}
+
+    # ---------- RAW PLOT ----------
+    if make_raw_plot:
+        fig, ax = plt.subplots(figsize=(7, 5))
+
+        if group_by_o2:
+            for zg in z_groups_sorted:
+                gmask = (z_round == zg)
+                xg = x[gmask]
+                yg = y[gmask]
+                if xg.size < 2:
+                    continue
+
+                idx = np.argsort(xg)
+                xg = xg[idx]
+                yg = yg[idx]
+
+                # model line for this O2 group
+                yhat_g = res.intercept + res.coef_invT * xg + res.m_o2 * float(zg)
+
+                col = color_map[zg]
+                lab = _label_for_z(float(zg))
+
+                ax.plot(xg, yg, "o", color=col, label=f"data ({lab})")
+                ax.plot(xg, yhat_g, "-", color=col, label=f"model ({lab})")
+        else:
+            # no grouping: avoid connecting across mixed O2 values
+            yhat = res.intercept + res.coef_invT * x + res.m_o2 * z
+            ax.plot(x, y, "o", label="data (all runs)")
+            ax.plot(x, yhat, ".", label="model (per-point)")
+
+        ax.set_xlabel("1/T [1/K]")
+        ax.set_ylabel("ln(g(w)/T²)")
+        ax.set_title(base_title + " — raw" + n_txt)
+        ax.legend()
+        fig.tight_layout()
+
+        if save_path:
+            fig.savefig(f"{save_path}_raw.png", dpi=150, bbox_inches="tight")
+        if show:
+            plt.show()
+        plt.close(fig)
+
+    # ---------- O2-CORRECTED PLOT ----------
+    if make_corrected_plot:
+        fig, ax = plt.subplots(figsize=(7, 5))
+
+        y_corr = y - res.m_o2 * z
+
+        if group_by_o2:
+            for zg in z_groups_sorted:
+                gmask = (z_round == zg)
+                xg = x[gmask]
+                yc = y_corr[gmask]
+                if xg.size < 2:
+                    continue
+
+                idx = np.argsort(xg)
+                xg = xg[idx]
+                yc = yc[idx]
+
+                col = color_map[zg]
+                lab = _label_for_z(float(zg))
+                ax.plot(xg, yc, "o", color=col, label=f"data ({lab})")
+        else:
+            ax.plot(x, y_corr, "o", label="data (O₂-corrected)")
+
+        # single collapsed fit line
+        x_line = np.linspace(np.min(x), np.max(x), 200)
+        yhat_corr = res.intercept + res.coef_invT * x_line
+        ax.plot(
+            x_line, yhat_corr, "-",
+            label=f"fit (Ea={Ea_kJ:.1f} kJ/mol, A={A_val:.3g}, m_O2={res.m_o2:.2f}, R²={r2:.3f})"
+        )
+
+        ax.set_xlabel("1/T [1/K]")
+        ax.set_ylabel("ln(g(w)/T²) − m_O2·ln(yO2)")
+        ax.set_title(base_title + " — O₂-corrected" + n_txt)
+        ax.legend()
+        fig.tight_layout()
+
+        if save_path:
+            fig.savefig(f"{save_path}_corrected.png", dpi=150, bbox_inches="tight")
+        if show:
+            plt.show()
+        plt.close(fig)
+
+

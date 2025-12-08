@@ -234,21 +234,72 @@ def display_table(df, title):
     plt.tight_layout()
     plt.show()
 
-def plot_stacked_bar(data_dict, labels, title, ylabel="Weight %"):
+def plot_stacked_bar(
+    data_dict,
+    labels,
+    title,
+    ylabel="Weight %",
+    show_values=True,      # <- set True for Ultimate plots
+    decimals=2,             # <- change to 0 if you want whole numbers
+    min_height=2          # <- don't label tiny segments (set 0 to label all)
+):
     fig, ax = plt.subplots(figsize=(12, 6))
-    conditions = labels
     width = 0.7
-    bottom = np.zeros(len(conditions))
+    bottom = np.zeros(len(labels), dtype=float)
     colors = plt.cm.tab10.colors
+
     for i, (comp_name, values) in enumerate(data_dict.items()):
-        ax.bar(conditions, values, width, label=comp_name, bottom=bottom, color=colors[i % len(colors)])
-        bottom += np.array(values)
+        values_arr = np.array(values, dtype=float)
+
+        bars = ax.bar(
+            labels, values_arr, width,
+            label=comp_name,
+            bottom=bottom,
+            color=colors[i % len(colors)]
+        )
+
+        if show_values:
+            for bar, val in zip(bars, values_arr):
+                if np.isnan(val):
+                    continue
+
+                x = bar.get_x() + bar.get_width() / 2
+                y = bar.get_y() + bar.get_height() / 2
+
+                # Auto text color (white on dark bars, black on light bars)
+                r, g, b, _ = bar.get_facecolor()
+                luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                txt_color = "black" if luminance > 0.6 else "white"
+                if abs(val) < min_height:
+                    ax.text(
+                        x, y,
+                        f"{val:.{decimals}f}%",
+                        ha="center", va="center",
+                        fontsize=5, fontweight="bold",
+                        color=txt_color
+                    )
+                else:
+                    ax.text(
+                        x, y,
+                        f"{val:.{decimals}f}%",
+                        ha="center", va="center",
+                        fontsize=9, fontweight="bold",
+                        color=txt_color
+                    )
+
+        bottom += values_arr
+
     ax.set_ylabel(ylabel, fontsize=12)
     ax.set_title(title, fontsize=14, fontweight='bold')
     ax.legend(loc='upper right', bbox_to_anchor=(1.15, 1))
     plt.xticks(rotation=45, ha='right')
+
+    # Give a little headroom above the tallest stack
+    ax.set_ylim(0, np.max(bottom) * 1.05)
+
     plt.tight_layout()
     plt.show()
+
 
 # Plot Data (ordered)
 prox_plot_data = {

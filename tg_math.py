@@ -137,14 +137,15 @@ def estimate_segment_rate_zero_order(
         time_window=(float(t0), float(t1)),
     )
 
+
 def estimate_segment_rate_first_order(
-    df: pd.DataFrame,
-    *,
-    time_window: Tuple[float, float],
-    time_col: str = "time_min",
-    temp_col: str = "temp_C",
-    mass_col: str = "mass_pct",
-    label: Optional[str] = None,
+        df: pd.DataFrame,
+        *,
+        time_window: Tuple[float, float],
+        time_col: str = "time_min",
+        temp_col: str = "temp_C",
+        mass_col: str = "mass_pct",
+        label: Optional[str] = None,
 ) -> SegmentRate:
     """
     FIRST-ORDER (solid) isothermal estimation.
@@ -210,12 +211,14 @@ def estimate_segment_rate_first_order(
 
     # clip α to (0,1) and build regression vectors
     alpha = np.clip(alpha, 1e-9, 1.0 - 1e-9)
-    y = np.log(1.0 - alpha)       # should be linear vs time with slope = -k
+    y = np.log(1.0 - alpha)  # should be linear vs time with slope = -k
     x = t.astype(float)
 
     # mask finite
     mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(T_K) & (T_K > 0)
-    x = x[mask]; y = y[mask]; T_use = T_K[mask]
+    x = x[mask];
+    y = y[mask];
+    T_use = T_K[mask]
     if x.size < 3:
         raise ValueError("Insufficient finite points after masking for ln(1−α) vs t fit.")
 
@@ -237,9 +240,9 @@ def estimate_segment_rate_first_order(
         label=str(label),
         T_mean_K=T_mean,
         T_span_K=T_span,
-        r_abs=float(k),             # NOTE: now k (1/time), not |dm/dt|
+        r_abs=float(k),  # NOTE: now k (1/time), not |dm/dt|
         slope_signed=float(slope),  # slope of ln(1−α) vs t ≈ −k
-        intercept=float(intercept), # intercept of ln(1−α) vs t
+        intercept=float(intercept),  # intercept of ln(1−α) vs t
         r2_mass_vs_time=float(r2),  # R² of ln(1−α) vs t (name kept)
         n_points=int(x.size),
         time_window=(float(t0), float(t1)),
@@ -290,23 +293,24 @@ def arrhenius_plot_data(segments: Sequence[SegmentRate]):
     y = np.log(r[mask])
     return x, y
 
+
 def estimate_EA_A_nonisothermal_coats_redfern(
-    df: pd.DataFrame,
-    *,
-    time_window: tuple[float, float],
-    # solid reaction order in w = 1-α (i.e. dw/dt = -k w^n)
-    n_solid: float = 1.0,
-    # fit only points where α is in this range (computed within the time_window)
-    alpha_range: tuple[float, float] = (0.10, 0.80),
-    time_col: str = "time_min",
-    temp_col: str = "temp_C",
-    mass_col: str = "mass_pct",
-    R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
-    label: str | None = None,
-    enforce_non_negative: bool = True,
-    # robust m0 / m∞ estimation inside the time window
-    head_frac: float = 0.10,
-    tail_frac: float = 0.20,
+        df: pd.DataFrame,
+        *,
+        time_window: tuple[float, float],
+        # solid reaction order in w = 1-α (i.e. dw/dt = -k w^n)
+        n_solid: float = 1.0,
+        # fit only points where α is in this range (computed within the time_window)
+        alpha_range: tuple[float, float] = (0.10, 0.80),
+        time_col: str = "time_min",
+        temp_col: str = "temp_C",
+        mass_col: str = "mass_pct",
+        R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
+        label: str | None = None,
+        enforce_non_negative: bool = True,
+        # robust m0 / m∞ estimation inside the time window
+        head_frac: float = 0.10,
+        tail_frac: float = 0.20,
 ) -> "CoatsRedfernResult":
     """
     Coats–Redfern (integral) estimate of E_A and A on a *selected time segment*
@@ -486,21 +490,23 @@ def estimate_EA_A_nonisothermal_coats_redfern(
         y_ln_g_over_T2=np.asarray(y, dtype=float),
     )
 
+
+#pretty sure this is not what Hao meant, not really any use now
 def estimate_EA_A_nonisothermal_coats_redfern_global(
-    dfs: list[pd.DataFrame],
-    *,
-    time_window: tuple[float, float],
-    n_solid: float = 1.0,
-    alpha_range: tuple[float, float] = (0.10, 0.80),
-    time_col: str = "time_min",
-    temp_col: str = "temp_C",
-    mass_col: str = "mass_pct",
-    R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
-    labels: list[str] | None = None,
-    enforce_non_negative: bool = True,
-    head_frac: float = 0.10,
-    tail_frac: float = 0.20,
-    beta_fixed_K_per_time: float | None = 3.0,
+        dfs: list[pd.DataFrame],
+        *,
+        time_window: tuple[float, float],
+        n_solid: float = 1.0,
+        alpha_range: tuple[float, float] = (0.10, 0.80),
+        time_col: str = "time_min",
+        temp_col: str = "temp_C",
+        mass_col: str = "mass_pct",
+        R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
+        labels: list[str] | None = None,
+        enforce_non_negative: bool = True,
+        head_frac: float = 0.10,
+        tail_frac: float = 0.20,
+        beta_fixed_K_per_time: float | None = 3.0,
 ):
     """
     Global Coats–Redfern fit across multiple TG ramps.
@@ -606,9 +612,9 @@ def estimate_EA_A_nonisothermal_coats_redfern_global(
 
         # mask by alpha range
         mask = (
-            np.isfinite(T_K) & (T_K > 0) &
-            np.isfinite(alpha) &
-            (alpha > a_low) & (alpha < a_high)
+                np.isfinite(T_K) & (T_K > 0) &
+                np.isfinite(alpha) &
+                (alpha > a_low) & (alpha < a_high)
         )
         if mask.sum() < 3:
             counts.append(0)
@@ -640,7 +646,6 @@ def estimate_EA_A_nonisothermal_coats_redfern_global(
 
     if not all_x:
         raise ValueError("No usable Coats–Redfern points found across datasets for the given window/range.")
-
 
     X = np.concatenate(all_x)
     Y = np.concatenate(all_y)
@@ -691,3 +696,381 @@ def estimate_EA_A_nonisothermal_coats_redfern_global(
         dataset_point_counts=counts,
         labels=labels,
     )
+
+
+def estimate_global_coats_redfern_with_o2(
+        dfs: list[pd.DataFrame],
+        o2_fractions: list[float],
+        *,
+        time_window: tuple[float, float],
+        n_solid: float = 1.0,  # solid reaction order used in g(w)
+        alpha_range: tuple[float, float] = (0.10, 0.80),
+        beta_fixed_K_per_time: float = 3.0,  # 3 K/min if time is minutes
+        # columns
+        time_col: str = "time_min",
+        temp_col: str = "temp_C",
+        mass_col: str = "mass_pct",
+        # conversion normalization inside window
+        head_frac: float = 0.10,
+        tail_frac: float = 0.20,
+        # oxygen order handling
+        m_o2_fixed: float | None = None,  # set to 1.0 if you want to force O2 order
+        # fit options
+        equal_weight_per_dataset: bool = True,  # avoids runs with more points dominating
+        R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
+        label: str | None = None,
+        enforce_non_negative: bool = True,
+):
+    """
+    Global Coats–Redfern fit across multiple linear-heating ramps at different O2 fractions.
+
+    Model:
+        y = ln(g(w)/T^2) = ln(A*R/(beta*Ea)) + m*ln(yO2) - Ea/R * (1/T)
+
+    Returns an object with:
+        E_A_J_per_mol, A, m_o2, slope_invT, intercept, r2,
+        x_invT_all, z_lnO2_all, y_all (for plotting), dataset_point_counts, label.
+    """
+
+    @dataclass
+    class GlobalCR_O2_Result:
+        label: str | None
+        n_solid: float
+        alpha_range: tuple[float, float]
+        time_window: tuple[float, float]
+        beta_K_per_time: float
+        E_A_J_per_mol: float
+        A: float
+        m_o2: float
+        intercept: float
+        coef_lnO2: float
+        coef_invT: float
+        r2: float
+        n_points: int
+        dataset_point_counts: list[int]
+        x_invT_all: np.ndarray
+        z_lnO2_all: np.ndarray
+        y_all: np.ndarray
+
+    if len(dfs) != len(o2_fractions):
+        raise ValueError("dfs and o2_fractions must have the same length.")
+    if len(dfs) < 2:
+        raise ValueError("Need at least 2 datasets (preferably 3: 5%,10%,20%).")
+
+    t0, t1 = time_window
+    a_low, a_high = alpha_range
+    n_s = float(n_solid)
+
+    X_rows = []
+    y_rows = []
+    counts = []
+
+    for df, yO2 in zip(dfs, o2_fractions):
+        if not (np.isfinite(yO2) and yO2 > 0):
+            raise ValueError("All o2_fractions must be finite and > 0.")
+
+        seg = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
+        if seg.empty:
+            counts.append(0)
+            continue
+
+        seg[time_col] = pd.to_numeric(seg[time_col], errors="coerce")
+        seg[temp_col] = pd.to_numeric(seg[temp_col], errors="coerce")
+        seg[mass_col] = pd.to_numeric(seg[mass_col], errors="coerce")
+        seg = seg.dropna(subset=[time_col, temp_col, mass_col]).sort_values(time_col)
+        if seg.shape[0] < 5:
+            counts.append(0)
+            continue
+
+        t = seg[time_col].to_numpy(dtype=float)
+        t_rel = t - t[0]
+        T_K = seg[temp_col].to_numpy(dtype=float) + 273.15
+        m = seg[mass_col].to_numpy(dtype=float)
+
+        # robust m0 and m_inf within the segment window
+        N = m.size
+        k_head = max(3, int(round(head_frac * N)))
+        k_tail = max(3, int(round(tail_frac * N)))
+        m0 = float(np.nanmedian(m[:k_head]))
+        m_inf = float(np.nanmedian(m[-k_tail:]))
+
+        # loss vs gain
+        loss = (m[-1] < m[0])
+        eps = 1e-12
+        if loss:
+            denom = (m0 - m_inf)
+            if not np.isfinite(denom) or abs(denom) < eps:
+                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+            alpha = (m0 - m) / denom
+        else:
+            denom = (m_inf - m0)
+            if not np.isfinite(denom) or abs(denom) < eps:
+                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+            alpha = (m - m0) / denom
+
+        alpha = np.clip(alpha, 0.0, 1.0)
+        w = np.clip(1.0 - alpha, 1e-12, 1.0)
+
+        # filter by alpha range
+        mask = (
+                np.isfinite(T_K) & (T_K > 0) &
+                np.isfinite(alpha) &
+                (alpha > a_low) & (alpha < a_high)
+        )
+        if mask.sum() < 3:
+            counts.append(0)
+            continue
+
+        T_fit = T_K[mask]
+        w_fit = w[mask]
+
+        # g(w) for chosen solid order
+        if abs(n_s - 1.0) < 1e-12:
+            g = -np.log(w_fit)
+        else:
+            g = (np.power(w_fit, 1.0 - n_s) - 1.0) / (n_s - 1.0)
+
+        x_invT = 1.0 / T_fit
+        y = np.log(np.clip(g, 1e-300, np.inf) / (T_fit ** 2))
+        z_lnO2 = np.log(float(yO2)) * np.ones_like(x_invT)
+
+        mm = np.isfinite(x_invT) & np.isfinite(y) & np.isfinite(z_lnO2)
+        x_invT = x_invT[mm]
+        y = y[mm]
+        z_lnO2 = z_lnO2[mm]
+
+        counts.append(int(x_invT.size))
+        if x_invT.size < 3:
+            continue
+
+        # Build design matrix rows:
+        # y = b0 + b1*lnO2 + b2*(1/T)
+        # If m_o2_fixed is set: subtract fixed term and fit only b0 + b2*(1/T)
+        if m_o2_fixed is not None:
+            y_adj = y - float(m_o2_fixed) * z_lnO2
+            X = np.column_stack([np.ones_like(x_invT), x_invT])
+        else:
+            X = np.column_stack([np.ones_like(x_invT), z_lnO2, x_invT])
+            y_adj = y
+
+        # Optional: equal weight per dataset
+        if equal_weight_per_dataset:
+            wgt = 1.0 / max(1, x_invT.size)
+            sw = math.sqrt(wgt)
+            X = X * sw
+            y_adj = y_adj * sw
+
+        X_rows.append(X)
+        y_rows.append(y_adj)
+
+    if not X_rows:
+        raise ValueError("No usable points found. Check time_window and alpha_range.")
+
+    X_all = np.vstack(X_rows)
+    y_all = np.concatenate(y_rows)
+
+    # OLS via lstsq
+    beta, *_ = np.linalg.lstsq(X_all, y_all, rcond=None)
+    yhat = X_all @ beta
+    ss_res = float(np.sum((y_all - yhat) ** 2))
+    ss_tot = float(np.sum((y_all - float(np.mean(y_all))) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    if m_o2_fixed is not None:
+        b0 = float(beta[0])
+        b2 = float(beta[1])
+        b1 = float(m_o2_fixed)
+    else:
+        b0 = float(beta[0])
+        b1 = float(beta[1])  # oxygen order m
+        b2 = float(beta[2])  # coefficient on 1/T
+
+    E_A = float(-b2 * R)
+    if enforce_non_negative and (not np.isfinite(E_A) or E_A < 0):
+        E_A = 0.0
+
+    # Coats–Redfern intercept relation:
+    # b0 = ln(A*R/(beta*Ea))  -> A = (beta*Ea/R)*exp(b0)
+    beta_used = float(beta_fixed_K_per_time)
+    if np.isfinite(b0) and np.isfinite(E_A) and E_A > 0 and beta_used > 0:
+        A = float((beta_used * E_A / R) * math.exp(b0))
+    else:
+        A = float("nan")
+
+    if enforce_non_negative and (not np.isfinite(A) or A < 0):
+        A = 0.0
+
+    # For plotting, return the *unweighted* combined points too:
+    # rebuild them quickly without weighting
+    x_plot = []
+    z_plot = []
+    y_plot = []
+    for df, yO2 in zip(dfs, o2_fractions):
+        seg = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
+        if seg.empty:
+            continue
+        seg[time_col] = pd.to_numeric(seg[time_col], errors="coerce")
+        seg[temp_col] = pd.to_numeric(seg[temp_col], errors="coerce")
+        seg[mass_col] = pd.to_numeric(seg[mass_col], errors="coerce")
+        seg = seg.dropna(subset=[time_col, temp_col, mass_col]).sort_values(time_col)
+        if seg.shape[0] < 5:
+            continue
+
+        T_K = seg[temp_col].to_numpy(dtype=float) + 273.15
+        m = seg[mass_col].to_numpy(dtype=float)
+
+        N = m.size
+        k_head = max(3, int(round(head_frac * N)))
+        k_tail = max(3, int(round(tail_frac * N)))
+        m0 = float(np.nanmedian(m[:k_head]))
+        m_inf = float(np.nanmedian(m[-k_tail:]))
+
+        loss = (m[-1] < m[0])
+        eps = 1e-12
+        if loss:
+            denom = (m0 - m_inf)
+            if not np.isfinite(denom) or abs(denom) < eps:
+                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+            alpha = (m0 - m) / denom
+        else:
+            denom = (m_inf - m0)
+            if not np.isfinite(denom) or abs(denom) < eps:
+                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+            alpha = (m - m0) / denom
+
+        alpha = np.clip(alpha, 0.0, 1.0)
+        w = np.clip(1.0 - alpha, 1e-12, 1.0)
+
+        mask = (
+                np.isfinite(T_K) & (T_K > 0) &
+                np.isfinite(alpha) &
+                (alpha > a_low) & (alpha < a_high)
+        )
+        if mask.sum() < 3:
+            continue
+
+        T_fit = T_K[mask]
+        w_fit = w[mask]
+        if abs(n_s - 1.0) < 1e-12:
+            g = -np.log(w_fit)
+        else:
+            g = (np.power(w_fit, 1.0 - n_s) - 1.0) / (n_s - 1.0)
+
+        x = 1.0 / T_fit
+        yv = np.log(np.clip(g, 1e-300, np.inf) / (T_fit ** 2))
+        zv = np.log(float(yO2)) * np.ones_like(x)
+
+        mm = np.isfinite(x) & np.isfinite(yv) & np.isfinite(zv)
+        x_plot.append(x[mm])
+        y_plot.append(yv[mm])
+        z_plot.append(zv[mm])
+
+    x_plot = np.concatenate(x_plot) if x_plot else np.array([], dtype=float)
+    y_plot = np.concatenate(y_plot) if y_plot else np.array([], dtype=float)
+    z_plot = np.concatenate(z_plot) if z_plot else np.array([], dtype=float)
+
+    return GlobalCR_O2_Result(
+        label=label,
+        n_solid=n_s,
+        alpha_range=(float(a_low), float(a_high)),
+        time_window=(float(t0), float(t1)),
+        beta_K_per_time=beta_used,
+        E_A_J_per_mol=float(E_A),
+        A=float(A),
+        m_o2=float(b1),
+        intercept=float(b0),
+        coef_lnO2=float(b1),
+        coef_invT=float(b2),
+        r2=float(r2),
+        n_points=int(np.sum(np.isfinite(x_plot) & np.isfinite(y_plot))),
+        dataset_point_counts=counts,
+        x_invT_all=x_plot,
+        z_lnO2_all=z_plot,
+        y_all=y_plot,
+    )
+
+
+def simulate_alpha_ramp(
+        *,
+        time_min: np.ndarray,
+        temp_C: np.ndarray,
+        yO2: float,
+        E_A_J_per_mol: float,
+        A: float,
+        m_o2: float,
+        solid_order: int = 1,
+        alpha0: float = 0.0,
+        R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
+) -> np.ndarray:
+    """
+    Simulate conversion alpha(t) for a non-isothermal ramp using:
+        dα/dt = k(T,yO2) * (1-α)^(solid_order)
+        k = A * yO2^m_o2 * exp(-Ea/(R*T))
+
+    time_min must be increasing; A will be in 1/min if time is minutes.
+    Returns alpha array, clipped to [0,1].
+    """
+    t = np.asarray(time_min, dtype=float)
+    T_K = np.asarray(temp_C, dtype=float) + 273.15
+
+    if t.ndim != 1 or T_K.ndim != 1 or t.size != T_K.size:
+        raise ValueError("time_min and temp_C must be 1D arrays of same length.")
+    if t.size < 2:
+        raise ValueError("Need at least 2 time points.")
+    if not (np.isfinite(yO2) and yO2 > 0):
+        raise ValueError("yO2 must be > 0.")
+    if not (np.isfinite(A) and A > 0):
+        raise ValueError("A must be > 0.")
+    if not (np.isfinite(E_A_J_per_mol) and E_A_J_per_mol >= 0):
+        raise ValueError("Ea must be finite and >= 0.")
+
+    # Ensure increasing time
+    if np.any(np.diff(t) <= 0):
+        idx = np.argsort(t)
+        t = t[idx]
+        T_K = T_K[idx]
+
+    alpha = np.empty_like(t)
+    a = float(alpha0)
+    a = min(max(a, 0.0), 1.0)
+    alpha[0] = a
+
+    yO2_term = float(yO2) ** float(m_o2)
+
+    for i in range(1, t.size):
+        dt = float(t[i] - t[i - 1])
+        Ti = float(T_K[i - 1])
+        if not np.isfinite(Ti) or Ti <= 0:
+            alpha[i] = a
+            continue
+
+        k = float(A * yO2_term * np.exp(-float(E_A_J_per_mol) / (R * Ti)))
+
+        if solid_order == 0:
+            f = 1.0
+        elif solid_order == 1:
+            f = max(0.0, 1.0 - a)
+        elif solid_order == 2:
+            f = max(0.0, (1.0 - a) ** 2)
+        else:
+            f = max(0.0, (1.0 - a) ** float(solid_order))
+
+        da = k * f * dt  # Increment a based on timestep, k is rate, f is fraction unreacted, dt is time step in min
+        a = a + da  # update conversion for this time
+        a = min(max(a, 0.0), 1.0)  #make sure it is <1 and >0
+        alpha[i] = a  #add to list for time point i
+
+    return alpha
+
+
+def alpha_to_mass_pct(alpha: np.ndarray, m0: float, m_inf: float, *, loss: bool = True) -> np.ndarray:
+    """
+    Convert alpha(t) back to mass%.
+    If loss=True:  alpha=(m0-m)/(m0-m_inf) -> m = m0 - alpha*(m0-m_inf)
+    If loss=False (gain): alpha=(m-m0)/(m_inf-m0) -> m = m0 + alpha*(m_inf-m0)
+    """
+    a = np.asarray(alpha, dtype=float)
+    if loss:
+        return m0 - a * (m0 - m_inf)
+    else:
+        return m0 + a * (m_inf - m0)
