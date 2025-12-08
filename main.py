@@ -55,7 +55,7 @@ res = estimate_global_coats_redfern_with_o2(
     o2_fractions=[0.05, 0.10, 0.20],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
-    alpha_range=(0.20, 0.80),
+    alpha_range=(0.10, 0.20),
     beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
     label="PW ramps global O2 fit",
 )
@@ -67,7 +67,7 @@ print("R²:", res.r2)
 
 plot_global_coats_redfern_o2_fit(res, save_path="pw_global_cr", title="PW global CR fit")
 
-df = pw200
+df = pw250
 t0 = 32.0
 t1 = 195.0 # same time window
 seg = df[(df["time_min"] >= t0) & (df["time_min"] <= t1)].copy()
@@ -87,7 +87,7 @@ m_inf = float(np.nanmedian(m_exp[-k_tail:]))
 alpha_sim = simulate_alpha_ramp(
     time_min=t,
     temp_C=T,
-    yO2=0.1,
+    yO2=0.2,
     E_A_J_per_mol=res.E_A_J_per_mol,
     A=res.A,
     m_o2=res.m_o2,
@@ -106,5 +106,6 @@ plt.xlabel("time [min]")
 plt.ylabel("mass [%]")
 plt.legend()
 plt.tight_layout()
-plt.savefig("pw_mass_overlay.png", dpi=150)
+#plt.savefig("pw_mass_overlay.png", dpi=150)
 plt.close()
+
