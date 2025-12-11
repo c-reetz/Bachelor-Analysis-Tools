@@ -8,6 +8,9 @@ import math
 R_DEFAULT = 8.314462618  # J/mol/K
 
 
+####
+## Data classes and helper functions
+####
 @dataclass
 class SegmentRate:
     label: str
@@ -88,6 +91,52 @@ class GlobalCR_O2_Result:
     y_all: np.ndarray
 
 
+@dataclass
+class GlobalO2ArrheniusFit:
+    """Global fit: ln(k) = ln(A) + n*ln(O2) - Ea/R*(1/T)."""
+    label: str | None
+    E_A_J_per_mol: float
+    A: float
+    n_o2: float               # if fixed or fitted
+    slope_invT: float         # coefficient on (1/T)  -> should be negative
+    intercept_lnA: float      # ln(A)
+    r2: float
+    n_points: int
+    o2_basis: str             # "fraction" or "partial_pressure"
+    o2_ref_total_pressure: float | None  # only meaningful if partial_pressure used
+
+    def predict_k(self, T_K: float | np.ndarray, o2: float | np.ndarray) -> np.ndarray:
+        """Predict k(T, O2) in the same time units as the input k (e.g. 1/min)."""
+        T_K = np.asarray(T_K, dtype=float)
+        o2 = np.asarray(o2, dtype=float)
+        return self.A * np.power(o2, self.n_o2) * np.exp(-self.E_A_J_per_mol / (R_DEFAULT * T_K))
+
+####
+# Core fitting and estimation functions (Privates)
+####
+def _ols_multi(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Ordinary least squares for multiple regressors.
+    Returns (beta, r2).
+    """
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    m = np.all(np.isfinite(X), axis=1) & np.isfinite(y)
+    X = X[m]
+    y = y[m]
+    if X.shape[0] < X.shape[1] + 1:
+        raise ValueError("Not enough rows for OLS fit (need > number of parameters).")
+
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    yhat = X @ beta
+    ss_res = float(np.sum((y - yhat) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return beta, float(r2)
+
+
+
 def _linear_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
     """
     Ordinary least squares fit of y = intercept + slope * x (with an intercept).
@@ -148,52 +197,10 @@ def _linear_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
 def _slice_window(df: pd.DataFrame, time_col: str, t0: float, t1: float) -> pd.DataFrame:
     return df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
 
-
-# For isothermal holds. Not used, assuming first-order.
-def estimate_segment_rate_zero_order(
-        df: pd.DataFrame,
-        *,
-        time_window: Tuple[float, float],
-        time_col: str = "time_min",
-        temp_col: str = "temp_C",
-        mass_col: str = "mass_pct",
-        label: Optional[str] = None,
-) -> SegmentRate:
-    """
-    zero-order isothermal estimation
-    uses ln(r) where r=dm/dt = K
-    K = A * exp(-E_A / R*T)
-    Graph ends up being y = ln(r)
-    x = 1/T
-    so:
-    ln(A) + -E_A/R * 1/T
-    """
-    if label is None: label = "segment"
-    t0, t1 = time_window
-    sel = _slice_window(df, time_col, t0, t1)
-    if sel.empty:
-        raise ValueError(f"No data in time window {time_window}.")
-    t = sel[time_col].to_numpy(dtype=float)
-    m = sel[mass_col].to_numpy(dtype=float)
-    T = sel[temp_col].to_numpy(dtype=float) + 273.15
-    slope, intercept, r2 = _linear_fit(t, m)  # mass = intercept + slope * time
-    r_abs = abs(slope)
-    T_mean = float(np.nanmean(T))
-    T_span = float(np.nanmax(T) - np.nanmin(T)) if len(T) > 0 else float("nan")
-    return SegmentRate(
-        label=str(label),
-        T_mean_K=T_mean,
-        T_span_K=T_span,
-        r_abs=float(r_abs),
-        slope_signed=float(slope),
-        intercept=float(intercept),
-        r2_mass_vs_time=float(r2),
-        n_points=int(len(sel)),
-        time_window=(float(t0), float(t1)),
-    )
-
-
-# Isothermal holds
+####
+# Isothermal functions
+####
+# Isothermal holds rate constant over the segment.
 def estimate_segment_rate_first_order(
         df: pd.DataFrame,
         *,
@@ -302,7 +309,6 @@ def estimate_segment_rate_first_order(
         time_window=(float(t0), float(t1)),
     )
 
-
 def estimate_arrhenius_from_segments(
         segments: Sequence[SegmentRate],
         *,
@@ -347,7 +353,153 @@ def arrhenius_plot_data(segments: Sequence[SegmentRate]):
     y = np.log(r[mask])
     return x, y
 
+#Global fitting. Multiple datasets
+def estimate_global_arrhenius_with_o2_from_segments(
+    segments: list,
+    o2_values: list[float],
+    *,
+    # set this if you want to FORCE n=1 (or any fixed n)
+    n_o2_fixed: float | None = None,
+    # "fraction" uses y_O2 (0.05/0.10/0.20); "partial_pressure" uses p_O2 (e.g. bar)
+    o2_basis: str = "fraction",
+    total_pressure: float | None = None,   # only used if you pass fractions but want p_O2
+    R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
+    label: str | None = None,
+    enforce_non_negative: bool = True,
+) -> GlobalO2ArrheniusFit:
+    """
+    Fit one global (Ea, A, n) across many isothermal segments:
+        ln(k) = ln(A) + n*ln(O2) - Ea/R*(1/T)
 
+    `segments` should contain objects with:
+        - s.T_mean_K
+        - s.r_abs   (k, must be >0)
+
+    If n_o2_fixed is None -> n is fitted (requires >=2 unique O2 values).
+    If n_o2_fixed is given -> fit only Ea and A (n fixed).
+    """
+    if len(segments) != len(o2_values):
+        raise ValueError("segments and o2_values must have the same length.")
+    if len(segments) < 3:
+        raise ValueError("Need at least 3 segments for a stable global fit.")
+
+    T = np.array([float(s.T_mean_K) for s in segments], dtype=float)
+    k = np.array([float(s.r_abs) for s in segments], dtype=float)
+
+    if np.any(~np.isfinite(T)) or np.any(T <= 0):
+        raise ValueError("Invalid T_mean_K in segments.")
+    if np.any(~np.isfinite(k)) or np.any(k <= 0):
+        raise ValueError("All segment rates (r_abs) must be finite and >0 to take ln(k).")
+
+    o2 = np.array([float(v) for v in o2_values], dtype=float)
+    if np.any(~np.isfinite(o2)) or np.any(o2 <= 0):
+        raise ValueError("All O2 values must be finite and >0.")
+
+    # Choose O2 representation for the regression
+    if o2_basis not in ("fraction", "partial_pressure"):
+        raise ValueError("o2_basis must be 'fraction' or 'partial_pressure'.")
+
+    if o2_basis == "fraction":
+        ln_o2 = np.log(o2)  # dimensionless
+        p_ref = None
+    else:
+        # if user supplied fractions but wants pO2: need total_pressure
+        # here we assume o2_values already are pO2 in chosen units
+        ln_o2 = np.log(o2)
+        p_ref = total_pressure
+
+    invT = 1.0 / T
+    y = np.log(k)
+
+    # If n fixed: subtract its contribution and fit y = ln(A) + (-Ea/R)*invT
+    if n_o2_fixed is not None:
+        n_val = float(n_o2_fixed)
+        y_adj = y - n_val * ln_o2
+        X = np.column_stack([np.ones_like(invT), invT])
+        beta, r2 = _ols_multi(X, y_adj)
+        lnA = float(beta[0])
+        b_invT = float(beta[1])  # equals -Ea/R
+    else:
+        # Need at least 2 distinct O2 levels to estimate n
+        if np.unique(np.round(ln_o2, 12)).size < 2:
+            raise ValueError("Cannot fit n_o2: only one O2 level present. Provide n_o2_fixed.")
+        X = np.column_stack([np.ones_like(invT), ln_o2, invT])
+        beta, r2 = _ols_multi(X, y)
+        lnA = float(beta[0])
+        n_val = float(beta[1])
+        b_invT = float(beta[2])
+
+    E_A = float(-b_invT * R)
+    A = float(math.exp(lnA)) if np.isfinite(lnA) else float("nan")
+
+    if enforce_non_negative:
+        if not np.isfinite(E_A) or E_A < 0:
+            E_A = 0.0
+        if not np.isfinite(A) or A < 0:
+            A = 0.0
+
+    return GlobalO2ArrheniusFit(
+        label=label,
+        E_A_J_per_mol=E_A,
+        A=A,
+        n_o2=n_val,
+        slope_invT=b_invT,
+        intercept_lnA=lnA,
+        r2=r2,
+        n_points=int(np.sum(np.isfinite(y) & np.isfinite(invT) & np.isfinite(ln_o2))),
+        o2_basis=o2_basis,
+        o2_ref_total_pressure=p_ref,
+    )
+
+#Convenience wrapper for above function
+def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
+    dfs: list[pd.DataFrame],
+    time_windows: list[tuple[float, float]],
+    o2_fractions: list[float],
+    *,
+    alpha_range: tuple[float, float] = (0.10, 0.60),
+    # if you want to force first order solid: use your existing first-order segment rate estimator
+    time_col: str = "time_min",
+    mass_col: str = "mass_pct",
+    temp_col: str = "temp_C",
+    n_o2_fixed: float | None = None,
+    label: str | None = None,
+) -> GlobalO2ArrheniusFit:
+    """
+    One-call global fit from multiple isothermal datasets:
+      - extracts k from each dataset using estimate_segment_rate_first_order(...)
+      - then fits ln(k) = ln(A) + n ln(yO2) - Ea/R * 1/T
+    """
+    if not (len(dfs) == len(time_windows) == len(o2_fractions)):
+        raise ValueError("dfs, time_windows, o2_fractions must have the same length.")
+
+    segments = []
+    for df, tw in zip(dfs, time_windows):
+        # Uses your existing function from tg_math:
+        #   estimate_segment_rate_first_order(df, time_window=..., alpha_range=..., ...)
+        seg = estimate_segment_rate_first_order(
+            df,
+            time_window=tw,
+            alpha_range=alpha_range,
+            time_col=time_col,
+            mass_col=mass_col,
+            temp_col=temp_col,
+        )
+        segments.append(seg)
+
+    return estimate_global_arrhenius_with_o2_from_segments(
+        segments,
+        o2_values=o2_fractions,
+        n_o2_fixed=n_o2_fixed,
+        o2_basis="fraction",
+        label=label,
+    )
+
+
+
+####
+# Non-isothermal Coats-Redfern fits
+####
 def estimate_global_coats_redfern_with_o2(
         dfs: list[pd.DataFrame],
         o2_fractions: list[float],
@@ -704,10 +856,54 @@ def alpha_to_mass_pct(alpha: np.ndarray, m0: float, m_inf: float, *, loss: bool 
     else:
         return m0 + a * (m_inf - m0)
 
-
+####
 # Old, unused code, kept for reference
-
+####
 """
+# For isothermal holds. Not used, assuming first-order.
+def estimate_segment_rate_zero_order(
+        df: pd.DataFrame,
+        *,
+        time_window: Tuple[float, float],
+        time_col: str = "time_min",
+        temp_col: str = "temp_C",
+        mass_col: str = "mass_pct",
+        label: Optional[str] = None,
+) -> SegmentRate:
+    " " "
+    zero-order isothermal estimation
+    uses ln(r) where r=dm/dt = K
+    K = A * exp(-E_A / R*T)
+    Graph ends up being y = ln(r)
+    x = 1/T
+    so:
+    ln(A) + -E_A/R * 1/T
+    " " "
+    if label is None: label = "segment"
+    t0, t1 = time_window
+    sel = _slice_window(df, time_col, t0, t1)
+    if sel.empty:
+        raise ValueError(f"No data in time window {time_window}.")
+    t = sel[time_col].to_numpy(dtype=float)
+    m = sel[mass_col].to_numpy(dtype=float)
+    T = sel[temp_col].to_numpy(dtype=float) + 273.15
+    slope, intercept, r2 = _linear_fit(t, m)  # mass = intercept + slope * time
+    r_abs = abs(slope)
+    T_mean = float(np.nanmean(T))
+    T_span = float(np.nanmax(T) - np.nanmin(T)) if len(T) > 0 else float("nan")
+    return SegmentRate(
+        label=str(label),
+        T_mean_K=T_mean,
+        T_span_K=T_span,
+        r_abs=float(r_abs),
+        slope_signed=float(slope),
+        intercept=float(intercept),
+        r2_mass_vs_time=float(r2),
+        n_points=int(len(sel)),
+        time_window=(float(t0), float(t1)),
+    )
+
+
 # This is not really used, because we do global fits with O2 Dependence, this does NOT include the O2 dependence!!!!
 def estimate_EA_A_nonisothermal_coats_redfern(
         df: pd.DataFrame,
