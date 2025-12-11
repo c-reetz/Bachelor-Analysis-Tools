@@ -1,10 +1,11 @@
 import re
 from io import StringIO
 from pathlib import Path
-
+from typing import Dict, Any, Optional, Callable
 import numpy as np
 import pandas as pd
 from pandas import DataFrame
+import logging
 
 HEADER_MARKER = "##Temp./°C;Time/min;Mass/%;Segment"
 
@@ -144,3 +145,98 @@ def load_thermogravimetric_data(path: str | Path) -> pd.DataFrame:
         return _load_region_from_csv_text(text)
 
     raise ValueError(f"Unsupported file type: {ext}")
+
+# Declarative spec: sample -> regime -> O2 label -> relative filepath (to base_dir)
+SPEC: Dict[str, Dict[str, Dict[str, str]]] = {
+    "BRF": {
+        "isothermal_225": {
+            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_BRF500.xlsx",
+            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_BRF500.xlsx",
+            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_BRF.xlsx",
+        },
+        "isothermal_250": {
+            "5%": "",
+            "10%": "",
+            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_BRF 500.xlsx",
+        },
+        "linear": {
+            "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_BRF500.xlsx",
+            "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_BRF500.xlsx",
+            "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_BRF500.xlsx",
+        },
+    },
+    "WS": {
+        "isothermal_225": {
+            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_WS500.xlsx",
+            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_WS500.xlsx",
+            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_WS.xlsx",
+        },
+        "isothermal_250": {
+            "5%": "",
+            "10%": "",
+            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_WS500.xlsx",
+        },
+        "linear": {
+            "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_WS500.xlsx",
+            "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_WS500.xlsx",
+            "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_ws500.xlsx",
+        },
+    },
+    "PW": {
+        "isothermal_225": {
+            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_PW500.xlsx",
+            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_PW500.xlsx",
+            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_PW.xlsx",
+        },
+        "isothermal_250": {
+            "5%": "",
+            "10%": "",
+            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_PW500.xlsx",
+        },
+        "linear": {
+            "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_PW500.xlsx",
+            "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_PW500.xlsx",
+            "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_PW500.xlsx",
+        },
+    },
+}
+
+
+def load_all_thermogravimetric_data(
+    base_dir: Path | str,
+    spec: Dict[str, Dict[str, Dict[str, str]]] = SPEC,
+    loader: Optional[Callable[[str | Path], Any]] = None,
+    raise_on_missing: bool = False,
+) -> Dict[str, Dict[str, Dict[str, Optional[Any]]]]:
+    """
+    Load datasets defined in `spec` from `base_dir`.
+    Returns nested dict: data[sample][regime][o2_label] -> DataFrame | None
+    """
+    if loader is None:
+        loader = load_thermogravimetric_data  # use function from this module
+
+    base = Path(base_dir)
+    results: Dict[str, Dict[str, Dict[str, Optional[Any]]]] = {}
+
+    for sample, regimes in spec.items():
+        results[sample] = {}
+        for regime, o2_map in regimes.items():
+            results[sample][regime] = {}
+            for o2_label, rel_path in o2_map.items():
+                if not rel_path:
+                    results[sample][regime][o2_label] = None
+                    continue
+                fp = base / rel_path
+                if not fp.exists():
+                    msg = f"missing file: {fp}"
+                    if raise_on_missing:
+                        raise FileNotFoundError(msg)
+                    logging.warning(msg)
+                    results[sample][regime][o2_label] = None
+                    continue
+                try:
+                    results[sample][regime][o2_label] = loader(fp)
+                except Exception as exc:
+                    logging.exception("failed to load %s: %s", fp, exc)
+                    results[sample][regime][o2_label] = None
+    return results
