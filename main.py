@@ -1,15 +1,6 @@
 from pathlib import Path
 
-import numpy as np
-from matplotlib import pyplot as plt
-
 from tg_loader import load_all_thermogravimetric_data, SPEC
-from tg_math import estimate_segment_rate_first_order, \
-    estimate_arrhenius_from_segments, arrhenius_plot_data,  \
-    estimate_global_coats_redfern_with_o2, simulate_alpha_ramp, \
-    alpha_to_mass_pct
-from tg_plotting import plot_ln_r_vs_time, plot_arrhenius, plot_arrhenius_groups, plot_coats_redfern_overlays, \
-    plot_coats_redfern_global, plot_global_coats_redfern_o2_fit
 
 ODIN_PATH = "./TG_Data/Odin Data/"
 SIF_PATH = "./TG_Data/Sif Data/"
@@ -75,7 +66,7 @@ pw_10o2_linear = data["PW"]["linear"]["10%"]
 pw_20o2_linear = data["PW"]["linear"]["20%"]
 
 #####
-# Parse time segments todo: better scheme
+# Parse Segments
 #####
 
 # BRF

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Sequence, Dict, Any
+from typing import Optional, Tuple, List, Sequence, Dict, Any, Literal
 import numpy as np
 import pandas as pd
 import math
@@ -36,6 +36,7 @@ class ArrheniusResult:
     y_lnr: np.ndarray
     extras: Dict[str, Any]
 
+
 @dataclass
 class CoatsRedfernResult:
     label: str | None
@@ -51,6 +52,7 @@ class CoatsRedfernResult:
     A: float
     x_invT: np.ndarray
     y_ln_g_over_T2: np.ndarray
+
 
 @dataclass
 class CoatsRedfernGlobalResult:
@@ -69,6 +71,7 @@ class CoatsRedfernGlobalResult:
     y_ln_g_over_T2: np.ndarray
     dataset_point_counts: list[int]
     labels: list[str] | None
+
 
 @dataclass
 class GlobalCR_O2_Result:
@@ -97,12 +100,12 @@ class GlobalO2ArrheniusFit:
     label: str | None
     E_A_J_per_mol: float
     A: float
-    n_o2: float               # if fixed or fitted
-    slope_invT: float         # coefficient on (1/T)  -> should be negative
-    intercept_lnA: float      # ln(A)
+    n_o2: float  # if fixed or fitted
+    slope_invT: float  # coefficient on (1/T)  -> should be negative
+    intercept_lnA: float  # ln(A)
     r2: float
     n_points: int
-    o2_basis: str             # "fraction" or "partial_pressure"
+    o2_basis: str  # "fraction" or "partial_pressure"
     o2_ref_total_pressure: float | None  # only meaningful if partial_pressure used
 
     def predict_k(self, T_K: float | np.ndarray, o2: float | np.ndarray) -> np.ndarray:
@@ -110,6 +113,7 @@ class GlobalO2ArrheniusFit:
         T_K = np.asarray(T_K, dtype=float)
         o2 = np.asarray(o2, dtype=float)
         return self.A * np.power(o2, self.n_o2) * np.exp(-self.E_A_J_per_mol / (R_DEFAULT * T_K))
+
 
 ####
 # Core fitting and estimation functions (Privates)
@@ -134,7 +138,6 @@ def _ols_multi(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, float]:
     ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
     return beta, float(r2)
-
 
 
 def _linear_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
@@ -197,117 +200,279 @@ def _linear_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
 def _slice_window(df: pd.DataFrame, time_col: str, t0: float, t1: float) -> pd.DataFrame:
     return df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
 
+
+ConversionBasis = Literal["alpha", "carbon"]
+
+ASH_FRACTION_DEFAULTS = {
+    "BRF": 0.4008,
+    "WS":  0.1728,
+    "PW":  0.011463,
+}
+
+def _resolve_ash_fraction(feedstock: Optional[str], ash_fraction: Optional[float]) -> float:
+    if ash_fraction is not None:
+        af = float(ash_fraction)
+    else:
+        if not feedstock:
+            raise ValueError("carbon basis requires ash_fraction or feedstock='BRF'/'WS'/'PW'")
+        key = str(feedstock).strip().upper()
+        if key not in ASH_FRACTION_DEFAULTS:
+            raise ValueError(f"Unknown feedstock '{feedstock}'. Use BRF/WS/PW or pass ash_fraction.")
+        af = ASH_FRACTION_DEFAULTS[key]
+    if not (0.0 <= af < 1.0):
+        raise ValueError(f"ash_fraction must be in [0,1). Got {af}")
+    return af
+
+def _compute_Xc_and_w_from_mass(
+    mass_pct: np.ndarray,
+    *,
+    ash_fraction: float,
+    m0_pct: Optional[float] = None,
+    eps: float = 1e-12,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Carbon conversion from raw mass% within the selected window:
+      m0 = max(mass%) in the window unless provided
+      Xc = (m0 - m) / (m0*(1-ash))
+      w  = 1 - Xc
+    """
+    m = np.asarray(mass_pct, dtype=float)
+    if m0_pct is None:
+        m0_pct = float(np.nanmax(m))
+    denom = m0_pct * (1.0 - float(ash_fraction))
+    if not np.isfinite(denom) or denom == 0:
+        Xc = np.full_like(m, np.nan, dtype=float)
+    else:
+        Xc = (m0_pct - m) / denom
+
+    Xc = np.clip(Xc, 0.0, 1.0)
+    w = np.clip(1.0 - Xc, eps, 1.0)  # avoid log(0)
+    return Xc, w, float(m0_pct)
+
+def _compute_alpha_w(
+    mass_pct: np.ndarray,
+    *,
+    m0_pct: Optional[float] = None,
+    m_inf_pct: Optional[float] = None,
+    head_frac: float = 0.10,
+    tail_frac: float = 0.20,
+    eps: float = 1e-12,
+) -> Tuple[np.ndarray, np.ndarray, float, float]:
+    """
+    Compute classic TG conversion alpha and remaining fraction w = 1 - alpha from a mass% window.
+
+    - If m0_pct/m_inf_pct not provided, estimate from window head/tail medians.
+    - Handles both mass-loss and mass-gain windows.
+    Returns: (alpha, w, m0_used, m_inf_used)
+    """
+    m = np.asarray(mass_pct, dtype=float)
+    m = m[np.isfinite(m)]
+    if m.size < 3:
+        alpha = np.full_like(np.asarray(mass_pct, dtype=float), np.nan, dtype=float)
+        w = alpha.copy()
+        return alpha, w, float("nan"), float("nan")
+
+    # robust m0/m_inf from head/tail if not supplied
+    N = m.size
+    k_head = max(3, int(round(head_frac * N)))
+    k_tail = max(3, int(round(tail_frac * N)))
+
+    m0_used = float(np.nanmedian(m[:k_head])) if m0_pct is None else float(m0_pct)
+    m_inf_used = float(np.nanmedian(m[-k_tail:])) if m_inf_pct is None else float(m_inf_pct)
+
+    # decide loss vs gain based on endpoints in the window
+    loss = (m[-1] < m[0])
+
+    if loss:
+        denom = (m0_used - m_inf_used)
+        if not np.isfinite(denom) or abs(denom) < eps:
+            denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+        alpha_win = (m0_used - m) / denom
+    else:
+        denom = (m_inf_used - m0_used)
+        if not np.isfinite(denom) or abs(denom) < eps:
+            denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+        alpha_win = (m - m0_used) / denom
+
+    alpha_win = np.clip(alpha_win, 0.0, 1.0)
+    w_win = np.clip(1.0 - alpha_win, eps, 1.0)
+
+    # map back to original shape (including any NaNs that were removed)
+    alpha = np.asarray(mass_pct, dtype=float)
+    w = np.asarray(mass_pct, dtype=float)
+
+    finite_mask = np.isfinite(alpha)
+    alpha[finite_mask] = alpha_win
+    w[finite_mask] = w_win
+
+    alpha[~finite_mask] = np.nan
+    w[~finite_mask] = np.nan
+
+    return alpha, w, m0_used, m_inf_used
+
+
+def _compute_conversion_and_w(
+    mass_pct: np.ndarray,
+    *,
+    conversion_basis: ConversionBasis,
+    feedstock: Optional[str] = None,
+    ash_fraction: Optional[float] = None,
+    m0_pct: Optional[float] = None,
+    m_inf_pct: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Returns:
+      X  = alpha  (if basis='alpha') OR Xc (if basis='carbon')
+      w  = 1 - X
+      meta dict (m0/m_inf/ash)
+    """
+    if conversion_basis == "alpha":
+        alpha, w, m0_used, m_inf_used = _compute_alpha_w(
+            mass_pct, m0_pct=m0_pct, m_inf_pct=m_inf_pct
+        )
+        return alpha, np.clip(w, 1e-12, 1.0), {"m0_pct": m0_used, "m_inf_pct": m_inf_used}
+
+    elif conversion_basis == "carbon":
+        af = _resolve_ash_fraction(feedstock, ash_fraction)
+        Xc, w, m0_used = _compute_Xc_and_w_from_mass(
+            mass_pct, ash_fraction=af, m0_pct=m0_pct
+        )
+        return Xc, np.clip(w, 1e-12, 1.0), {"m0_pct": m0_used, "ash_fraction": af}
+
+    else:
+        raise ValueError(f"Unknown conversion_basis: {conversion_basis}")
+
+
+
 ####
 # Isothermal functions
 ####
 # Isothermal holds rate constant over the segment.
 def estimate_segment_rate_first_order(
         df: pd.DataFrame,
+        time_window: tuple[float, float],
         *,
-        time_window: Tuple[float, float],
         time_col: str = "time_min",
         temp_col: str = "temp_C",
         mass_col: str = "mass_pct",
-        label: Optional[str] = None,
+        label: str | None = None,
+        # Conversion options
+        conversion_basis: ConversionBasis = "alpha",  # either "alpha" or "carbon"
+        feedstock: Optional[str] = None,  # feedstock name if using carbon conversion
+        ash_fraction: Optional[float] = None,  # if provided, will override feedstock for ash fraction
+        conversion_range: Optional[Tuple[float, float]] = None,  # filtering on conversion range
+        alpha_range: tuple[float, float] = (0.10, 0.80),  # legacy support
+        # Isothermal hold settings
+        n_solid: float = 1.0,  # solid reaction order used in g(w)
 ) -> SegmentRate:
     """
-    FIRST-ORDER (solid) isothermal estimation.
-    Computes conversion α from mass%, then fits ln(1−α) vs time inside the window:
-        ln(1−α) = ln(1−α0) − k * t   ⇒  slope = −k
-    Returns SegmentRate with:
-        r_abs        = k  (1/time; positive),
-        slope_signed = slope of ln(1−α) vs t  (≈ −k),
-        r2_mass_vs_time = R² of ln(1−α) vs t fit (name kept for backward compat).
+    Estimate k (rate constant) from an isothermal segment using first-order kinetics.
 
-    α definition (robust to loss/gain):
-        If mass decreases:  α = (m0 − m)/(m0 − m∞)
-        If mass increases:  α = (m − m0)/(m∞ − m0)
-    where m0 is the median of the first 10% of points in the window,
-          m∞ is the median of the last 20% of points in the window.
+    Conversion can be computed as either:
+      - "alpha" (classic conversion)
+      - "carbon" (based on mass% and ash correction)
+
+    For "carbon", ash fraction must be provided (or inferred from feedstock).
+
+    Parameters:
+      - conversion_range: limits the conversion range [0, 1] for filtering.
     """
-    if label is None:
-        label = "segment"
-
-    # --- slice window and extract arrays ---
     t0, t1 = time_window
-    sel = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
-    if sel.empty:
-        raise ValueError(f"No data in time window {time_window}.")
 
-    t = sel[time_col].to_numpy(dtype=float)
-    m = sel[mass_col].to_numpy(dtype=float)
-    T_K = sel[temp_col].to_numpy(dtype=float) + 273.15
+    # --- Prepare and filter the dataset ---
+    seg = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
+    seg[time_col] = pd.to_numeric(seg[time_col], errors="coerce")
+    seg[temp_col] = pd.to_numeric(seg[temp_col], errors="coerce")
+    seg[mass_col] = pd.to_numeric(seg[mass_col], errors="coerce")
+    seg = seg.dropna(subset=[time_col, temp_col, mass_col]).sort_values(time_col)
+    if seg.shape[0] < 5:
+        raise ValueError("Segment is too short after filtering.")
 
-    # rebase time to start of window
-    t = t - t[0]
+    # --- Get time, temperature, and mass data ---
+    t = seg[time_col].to_numpy(dtype=float)
+    T_K = seg[temp_col].to_numpy(dtype=float) + 273.15  # Convert to Kelvin
+    m = seg[mass_col].to_numpy(dtype=float)
 
-    n = len(sel)
-    if n < 5:
-        raise ValueError("Not enough points in window for a reliable first-order fit (need ≥5).")
+    # --- Conversion and mass calculation ---
+    eps = 1e-12  # Small value for safety in division
 
-    # --- robust m0 and m∞ from window head/tail ---
-    # Basically done to avoid outliers and noise at start/end of segment
-    k_head = max(3, int(round(0.10 * n)))
-    k_tail = max(3, int(round(0.20 * n)))
+    # Compute conversion based on selected basis
+    if conversion_basis == "alpha":
+        # Robust m0 and m_inf within the segment window
+        N = m.size
+        k_head = max(3, int(round(0.10 * N)))
+        k_tail = max(3, int(round(0.20 * N)))
+        m0 = float(np.nanmedian(m[:k_head]))  # m0 = max mass% in the initial part of the segment
+        m_inf = float(np.nanmedian(m[-k_tail:]))  # m_inf = min mass% in the final part of the segment
 
-    m0 = float(np.nanmedian(m[:k_head]))
-    minf_tail = float(np.nanmedian(m[-k_tail:]))
+        # Determine if it's a mass loss or gain
+        loss = (m[-1] < m[0])
+        if loss:
+            denom = (m0 - m_inf)
+            if not np.isfinite(denom) or abs(denom) < eps:
+                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+            alpha = (m0 - m) / denom
+        else:
+            denom = (m_inf - m0)
+            if not np.isfinite(denom) or abs(denom) < eps:
+                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+            alpha = (m - m0) / denom
 
-    # decide loss vs gain over the window
-    loss = (m[-1] < m[0])
+        alpha = np.clip(alpha, 0.0, 1.0)
+        w = np.clip(1.0 - alpha, 1e-12, 1.0)
 
-    # guard denominator
-    eps = 1e-12
-    if loss:
-        denom = (m0 - minf_tail)
+    elif conversion_basis == "carbon":
+        # Carbon conversion calculation: X_C = (m0 - m_t) / (m0 * (1 - ash_fraction))
+        af = _resolve_ash_fraction(feedstock, ash_fraction)  # Default for feedstock or passed fraction
+        m0_top = float(np.nanmax(m))  # top-point mass% in the selected time window
+        denom = m0_top * (1.0 - af)
+
         if not np.isfinite(denom) or abs(denom) < eps:
-            # fallback to span if needed
-            denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-        alpha = (m0 - m) / denom
+            raise ValueError("Invalid denominator for X_C. Check ash_fraction and mass window.")
+
+        X_C = (m0_top - m) / denom  # X_C conversion
+        X_C = np.clip(X_C, 0.0, 1.0)
+        w = np.clip(1.0 - X_C, 1e-12, 1.0)
+
     else:
-        denom = (minf_tail - m0)
-        if not np.isfinite(denom) or abs(denom) < eps:
-            denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-        alpha = (m - m0) / denom
+        raise ValueError(f"Unknown conversion_basis: {conversion_basis}")
 
-    # clip α to (0,1) and build regression vectors
-    alpha = np.clip(alpha, 1e-9, 1.0 - 1e-9)
-    y = np.log(1.0 - alpha)  # should be linear vs time with slope = -k
+    # --- Optional conversion window filtering ---
+    if conversion_range is not None:
+        lo, hi = conversion_range
+        mask = (X_C >= lo) & (X_C <= hi) if conversion_basis == "carbon" else (alpha >= lo) & (alpha <= hi)
+        t = t[mask]
+        w = w[mask]
+        T_K = T_K[mask]
+
+    # --- Fit the first-order solid kinetics model ---
     x = t.astype(float)
+    y = np.log(w)
 
     # mask finite
     mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(T_K) & (T_K > 0)
-    x = x[mask];
-    y = y[mask];
-    T_use = T_K[mask]
+    x = x[mask]
+    y = y[mask]
+    T_K = T_K[mask]
+
     if x.size < 3:
         raise ValueError("Insufficient finite points after masking for ln(1−α) vs t fit.")
 
-    # linear fit: y = a + b x
+    # --- Perform linear regression (OLS) for k ---
     slope, intercept, r2 = _linear_fit(x, y)
-    k = float(-slope)  # first-order rate constant (should be ≥ 0)
 
-    # enforce k ≥ 0
-    if not np.isfinite(k) or k < 0:
-        k = 0.0
-        slope = 0.0
-        # r2 becomes 0 for a flat fallback
-        r2 = 0.0
-
-    T_mean = float(np.nanmean(T_use))
-    T_span = float(np.nanmax(T_use) - np.nanmin(T_use)) if T_use.size else float("nan")
-
+    # Return k and other parameters
+    k = -slope
     return SegmentRate(
-        label=str(label),
-        T_mean_K=T_mean,
-        T_span_K=T_span,
-        r_abs=float(k),  # NOTE: now k (1/time), not |dm/dt|
-        slope_signed=float(slope),  # slope of ln(1−α) vs t ≈ −k
-        intercept=float(intercept),  # intercept of ln(1−α) vs t
-        r2_mass_vs_time=float(r2),  # R² of ln(1−α) vs t (name kept)
-        n_points=int(x.size),
-        time_window=(float(t0), float(t1)),
+        k=k,
+        slope=slope,
+        intercept=intercept,
+        r2=r2,
+        alpha=alpha,
+        conversion_basis=conversion_basis,
+        label=label
     )
+
 
 def estimate_arrhenius_from_segments(
         segments: Sequence[SegmentRate],
@@ -353,19 +518,20 @@ def arrhenius_plot_data(segments: Sequence[SegmentRate]):
     y = np.log(r[mask])
     return x, y
 
+
 #Global fitting. Multiple datasets
 def estimate_global_arrhenius_with_o2_from_segments(
-    segments: list,
-    o2_values: list[float],
-    *,
-    # set this if you want to FORCE n=1 (or any fixed n)
-    n_o2_fixed: float | None = None,
-    # "fraction" uses y_O2 (0.05/0.10/0.20); "partial_pressure" uses p_O2 (e.g. bar)
-    o2_basis: str = "fraction",
-    total_pressure: float | None = None,   # only used if you pass fractions but want p_O2
-    R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
-    label: str | None = None,
-    enforce_non_negative: bool = True,
+        segments: list,
+        o2_values: list[float],
+        *,
+        # set this if you want to FORCE n=1 (or any fixed n)
+        n_o2_fixed: float | None = None,
+        # "fraction" uses y_O2 (0.05/0.10/0.20); "partial_pressure" uses p_O2 (e.g. bar)
+        o2_basis: str = "fraction",
+        total_pressure: float | None = None,  # only used if you pass fractions but want p_O2
+        R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
+        label: str | None = None,
+        enforce_non_negative: bool = True,
 ) -> GlobalO2ArrheniusFit:
     """
     Fit one global (Ea, A, n) across many isothermal segments:
@@ -451,39 +617,82 @@ def estimate_global_arrhenius_with_o2_from_segments(
         o2_ref_total_pressure=p_ref,
     )
 
+
 #Convenience wrapper for above function
 def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
     dfs: list[pd.DataFrame],
     time_windows: list[tuple[float, float]],
     o2_fractions: list[float],
     *,
-    alpha_range: tuple[float, float] = (0.10, 0.60),
-    # if you want to force first order solid: use your existing first-order segment rate estimator
+    # Conversion filtering (applies inside estimate_segment_rate_first_order)
+    alpha_range: tuple[float, float] = (0.10, 0.60),                  # legacy name
+    conversion_range: Optional[Tuple[float, float]] = None,           # preferred
+    conversion_basis: ConversionBasis = "alpha",                      # "alpha" or "carbon"
+    feedstock: Optional[str] = None,
+    ash_fraction: Optional[float] = None,
+
+    # columns
     time_col: str = "time_min",
     mass_col: str = "mass_pct",
     temp_col: str = "temp_C",
-    n_o2_fixed: float | None = None,
+
+    # oxygen order handling
+    n_o2_fixed: float | None = None,                                  # fix m (gas order) if desired
     label: str | None = None,
 ) -> GlobalO2ArrheniusFit:
     """
-    One-call global fit from multiple isothermal datasets:
-      - extracts k from each dataset using estimate_segment_rate_first_order(...)
-      - then fits ln(k) = ln(A) + n ln(yO2) - Ea/R * 1/T
-    """
-    if not (len(dfs) == len(time_windows) == len(o2_fractions)):
-        raise ValueError("dfs, time_windows, o2_fractions must have the same length.")
+    Global fit from multiple ISOTHERMAL datasets.
 
-    segments = []
-    for df, tw in zip(dfs, time_windows):
-        # Uses your existing function from tg_math:
-        #   estimate_segment_rate_first_order(df, time_window=..., alpha_range=..., ...)
+    Workflow:
+      1) For each dataset i (each at a different temperature T_i), extract k_i from a chosen time window
+         using first-order solid kinetics on the chosen conversion basis:
+             ln(w) = ln(w0) - k t
+         where w = 1 - alpha   (conversion_basis="alpha")
+               w = 1 - X_C     (conversion_basis="carbon")
+
+      2) Global regression across datasets:
+             ln(k) = ln(A) + n*ln(O2) - Ea/R * (1/T)
+
+         If all O2 fractions are the same, the n*ln(O2) term is constant and folds into ln(A)
+         (you still get Ea correctly; A becomes an apparent A').
+
+    Parameters:
+      - dfs, time_windows, o2_fractions must have same length.
+      - time_windows can differ per dataset (common for different holds).
+      - conversion_range is preferred; if None, alpha_range is used.
+
+    Returns:
+      GlobalO2ArrheniusFit with Ea, A, n_o2, r2, etc.
+    """
+    if len(dfs) != len(time_windows) or len(dfs) != len(o2_fractions):
+        raise ValueError("dfs, time_windows, and o2_fractions must have the same length.")
+    if len(dfs) < 2:
+        raise ValueError("Need at least 2 isothermal datasets (3 recommended) to estimate Ea reliably.")
+
+    # Basic validation of O2 inputs
+    for y in o2_fractions:
+        if not (np.isfinite(y) and y > 0):
+            raise ValueError("All o2_fractions must be finite and > 0.")
+
+    segments: list[SegmentRate] = []
+
+    for i, (df, tw, yO2) in enumerate(zip(dfs, time_windows, o2_fractions), start=1):
+        seg_label = f"{label or 'iso'}_{i}_O2_{yO2:g}"
+
         seg = estimate_segment_rate_first_order(
             df,
             time_window=tw,
-            alpha_range=alpha_range,
             time_col=time_col,
-            mass_col=mass_col,
             temp_col=temp_col,
+            mass_col=mass_col,
+            label=seg_label,
+
+            # NEW: pass conversion controls through
+            conversion_basis=conversion_basis,
+            feedstock=feedstock,
+            ash_fraction=ash_fraction,
+            conversion_range=conversion_range,
+            alpha_range=alpha_range,   # keep for backwards compatibility
         )
         segments.append(seg)
 
@@ -501,27 +710,31 @@ def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
 # Non-isothermal Coats-Redfern fits
 ####
 def estimate_global_coats_redfern_with_o2(
-        dfs: list[pd.DataFrame],
-        o2_fractions: list[float],
-        *,
-        time_window: tuple[float, float],
-        n_solid: float = 1.0,  # solid reaction order used in g(w)
-        alpha_range: tuple[float, float] = (0.10, 0.80),
-        beta_fixed_K_per_time: float = 3.0,  # 3 K/min if time is minutes
-        # columns
-        time_col: str = "time_min",
-        temp_col: str = "temp_C",
-        mass_col: str = "mass_pct",
-        # conversion normalization inside window
-        head_frac: float = 0.10,
-        tail_frac: float = 0.20,
-        # oxygen order handling
-        m_o2_fixed: float | None = None,  # set to 1.0 if you want to force O2 order
-        # fit options
-        equal_weight_per_dataset: bool = True,  # avoids runs with more points dominating
-        R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
-        label: str | None = None,
-        enforce_non_negative: bool = True,
+    dfs: list[pd.DataFrame],
+    o2_fractions: list[float],
+    *,
+    time_window: tuple[float, float],
+    n_solid: float = 1.0,  # solid reaction order used in g(w)
+    alpha_range: tuple[float, float] = (0.10, 0.80),
+    beta_fixed_K_per_time: float = 3.0,  # 3 K/min if time is minutes
+    # columns
+    time_col: str = "time_min",
+    temp_col: str = "temp_C",
+    mass_col: str = "mass_pct",
+    # conversion normalization inside window (alpha basis only)
+    head_frac: float = 0.10,
+    tail_frac: float = 0.20,
+    # oxygen order handling
+    m_o2_fixed: float | None = None,  # set to 1.0 if you want to force O2 order
+    # fit options
+    equal_weight_per_dataset: bool = True,  # avoids runs with more points dominating
+    R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
+    label: str | None = None,
+    enforce_non_negative: bool = True,
+    conversion_basis: ConversionBasis = "alpha",
+    feedstock: Optional[str] = None,
+    ash_fraction: Optional[float] = None,
+    conversion_range: Optional[Tuple[float, float]] = None,
 ):
     """
     Global Coats–Redfern fit across multiple linear-heating ramps at different O2 fractions.
@@ -529,9 +742,13 @@ def estimate_global_coats_redfern_with_o2(
     Model:
         y = ln(g(w)/T^2) = ln(A*R/(beta*Ea)) + m*ln(yO2) - Ea/R * (1/T)
 
-    Returns an object with:
-        E_A_J_per_mol, A, m_o2, slope_invT, intercept, r2,
-        x_invT_all, z_lnO2_all, y_all (for plotting), dataset_point_counts, label.
+    Notes:
+      - conversion_basis="alpha": alpha computed from mass% using m0/m_inf in the selected time window.
+      - conversion_basis="carbon": X_C computed from raw mass% using
+            X_C = (m0_top - m) / (m0_top*(1-ash_fraction)),
+        where m0_top = max(mass%) in the selected time window.
+      - Filtering uses conversion_range if provided, otherwise falls back to alpha_range
+        (so old calls keep working).
     """
     if len(dfs) != len(o2_fractions):
         raise ValueError("dfs and o2_fractions must have the same length.")
@@ -539,12 +756,12 @@ def estimate_global_coats_redfern_with_o2(
         raise ValueError("Need at least 2 datasets (preferably 3: 5%,10%,20%).")
 
     t0, t1 = time_window
-    a_low, a_high = alpha_range
+    lo, hi = conversion_range if conversion_range is not None else alpha_range
     n_s = float(n_solid)
 
-    X_rows = []
-    y_rows = []
-    counts = []
+    X_blocks = []
+    y_blocks = []
+    counts: list[int] = []
 
     for df, yO2 in zip(dfs, o2_fractions):
         if not (np.isfinite(yO2) and yO2 > 0):
@@ -563,98 +780,113 @@ def estimate_global_coats_redfern_with_o2(
             counts.append(0)
             continue
 
-        t = seg[time_col].to_numpy(dtype=float)
-        t_rel = t - t[0]
         T_K = seg[temp_col].to_numpy(dtype=float) + 273.15
         m = seg[mass_col].to_numpy(dtype=float)
 
-        # robust m0 and m_inf within the segment window
-        N = m.size
-        k_head = max(3, int(round(head_frac * N)))
-        k_tail = max(3, int(round(tail_frac * N)))
-        m0 = float(np.nanmedian(m[:k_head]))
-        m_inf = float(np.nanmedian(m[-k_tail:]))
-
-        # loss vs gain
-        loss = (m[-1] < m[0])
         eps = 1e-12
-        if loss:
-            denom = (m0 - m_inf)
+
+        # --- compute conversion X and remaining fraction w = 1 - X ---
+        if conversion_basis == "alpha":
+            # robust m0 and m_inf within the window
+            N = m.size
+            k_head = max(3, int(round(head_frac * N)))
+            k_tail = max(3, int(round(tail_frac * N)))
+            m0 = float(np.nanmedian(m[:k_head]))
+            m_inf = float(np.nanmedian(m[-k_tail:]))
+
+            # loss vs gain
+            loss = (m[-1] < m[0])
+
+            if loss:
+                denom = (m0 - m_inf)
+                if not np.isfinite(denom) or abs(denom) < eps:
+                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                X_conv = (m0 - m) / denom
+            else:
+                denom = (m_inf - m0)
+                if not np.isfinite(denom) or abs(denom) < eps:
+                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                X_conv = (m - m0) / denom
+
+            X_conv = np.clip(X_conv, 0.0, 1.0)
+
+        elif conversion_basis == "carbon":
+            af = _resolve_ash_fraction(feedstock, ash_fraction)  # your helper/defaults
+            m0_top = float(np.nanmax(m))  # top-point in THIS window
+            denom = m0_top * (1.0 - af)
             if not np.isfinite(denom) or abs(denom) < eps:
-                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-            alpha = (m0 - m) / denom
+                raise ValueError("Invalid denominator for X_C. Check ash_fraction and mass window.")
+            X_conv = (m0_top - m) / denom
+            X_conv = np.clip(X_conv, 0.0, 1.0)
+
         else:
-            denom = (m_inf - m0)
-            if not np.isfinite(denom) or abs(denom) < eps:
-                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-            alpha = (m - m0) / denom
+            raise ValueError(f"Unknown conversion_basis: {conversion_basis}")
 
-        alpha = np.clip(alpha, 0.0, 1.0)
-        w = np.clip(1.0 - alpha, 1e-12, 1.0)
+        w = np.clip(1.0 - X_conv, 1e-12, 1.0)
 
-        # filter by alpha range
+        # --- filter by conversion range on X (alpha OR Xc) ---
         mask = (
-                np.isfinite(T_K) & (T_K > 0) &
-                np.isfinite(alpha) &
-                (alpha > a_low) & (alpha < a_high)
+            np.isfinite(T_K) & (T_K > 0) &
+            np.isfinite(X_conv) & (X_conv > float(lo)) & (X_conv < float(hi)) &
+            np.isfinite(w)
         )
-        if mask.sum() < 3:
+        if int(np.sum(mask)) < 3:
             counts.append(0)
             continue
 
         T_fit = T_K[mask]
         w_fit = w[mask]
 
-        # g(w) for chosen solid order
+        # --- g(w) for chosen solid order ---
         if abs(n_s - 1.0) < 1e-12:
             g = -np.log(w_fit)
         else:
+            # consistent with your existing implementation
             g = (np.power(w_fit, 1.0 - n_s) - 1.0) / (n_s - 1.0)
 
         x_invT = 1.0 / T_fit
-        y = np.log(np.clip(g, 1e-300, np.inf) / (T_fit ** 2))
+        y_cr = np.log(np.clip(g, 1e-300, np.inf) / (T_fit ** 2))
         z_lnO2 = np.log(float(yO2)) * np.ones_like(x_invT)
 
-        mm = np.isfinite(x_invT) & np.isfinite(y) & np.isfinite(z_lnO2)
+        mm = np.isfinite(x_invT) & np.isfinite(y_cr) & np.isfinite(z_lnO2)
         x_invT = x_invT[mm]
-        y = y[mm]
+        y_cr = y_cr[mm]
         z_lnO2 = z_lnO2[mm]
 
         counts.append(int(x_invT.size))
         if x_invT.size < 3:
             continue
 
-        # Build design matrix rows:
+        # Design matrix:
         # y = b0 + b1*lnO2 + b2*(1/T)
-        # If m_o2_fixed is set: subtract fixed term and fit only b0 + b2*(1/T)
         if m_o2_fixed is not None:
-            y_adj = y - float(m_o2_fixed) * z_lnO2
-            X = np.column_stack([np.ones_like(x_invT), x_invT])
+            y_adj = y_cr - float(m_o2_fixed) * z_lnO2
+            Xmat = np.column_stack([np.ones_like(x_invT), x_invT])
         else:
-            X = np.column_stack([np.ones_like(x_invT), z_lnO2, x_invT])
-            y_adj = y
+            Xmat = np.column_stack([np.ones_like(x_invT), z_lnO2, x_invT])
+            y_adj = y_cr
 
         # Optional: equal weight per dataset
         if equal_weight_per_dataset:
             wgt = 1.0 / max(1, x_invT.size)
             sw = math.sqrt(wgt)
-            X = X * sw
+            Xmat = Xmat * sw
             y_adj = y_adj * sw
 
-        X_rows.append(X)
-        y_rows.append(y_adj)
+        X_blocks.append(Xmat)
+        y_blocks.append(y_adj)
 
-    if not X_rows:
-        raise ValueError("No usable points found. Check time_window and alpha_range.")
+    if not X_blocks:
+        raise ValueError("No usable points found. Check time_window and conversion_range/alpha_range.")
 
-    X_all = np.vstack(X_rows)
-    y_all = np.concatenate(y_rows)
+    X_all = np.vstack(X_blocks)
+    y_all_fit = np.concatenate(y_blocks)
 
     # OLS via lstsq
-    beta, *_ = np.linalg.lstsq(X_all, y_all, rcond=None)
+    beta, *_ = np.linalg.lstsq(X_all, y_all_fit, rcond=None)
     yhat = X_all @ beta
-    ss_res = float(np.sum((y_all - yhat) ** 2))
-    ss_tot = float(np.sum((y_all - float(np.mean(y_all))) ** 2))
+    ss_res = float(np.sum((y_all_fit - yhat) ** 2))
+    ss_tot = float(np.sum((y_all_fit - float(np.mean(y_all_fit))) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
 
     if m_o2_fixed is not None:
@@ -681,15 +913,16 @@ def estimate_global_coats_redfern_with_o2(
     if enforce_non_negative and (not np.isfinite(A) or A < 0):
         A = 0.0
 
-    # For plotting, return the *unweighted* combined points too:
-    # rebuild them quickly without weighting
-    x_plot = []
-    z_plot = []
-    y_plot = []
+    # --- rebuild UNWEIGHTED points for plotting (consistent with conversion_basis) ---
+    x_plot_list: list[np.ndarray] = []
+    y_plot_list: list[np.ndarray] = []
+    z_plot_list: list[np.ndarray] = []
+
     for df, yO2 in zip(dfs, o2_fractions):
         seg = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
         if seg.empty:
             continue
+
         seg[time_col] = pd.to_numeric(seg[time_col], errors="coerce")
         seg[temp_col] = pd.to_numeric(seg[temp_col], errors="coerce")
         seg[mass_col] = pd.to_numeric(seg[mass_col], errors="coerce")
@@ -700,38 +933,53 @@ def estimate_global_coats_redfern_with_o2(
         T_K = seg[temp_col].to_numpy(dtype=float) + 273.15
         m = seg[mass_col].to_numpy(dtype=float)
 
-        N = m.size
-        k_head = max(3, int(round(head_frac * N)))
-        k_tail = max(3, int(round(tail_frac * N)))
-        m0 = float(np.nanmedian(m[:k_head]))
-        m_inf = float(np.nanmedian(m[-k_tail:]))
-
-        loss = (m[-1] < m[0])
         eps = 1e-12
-        if loss:
-            denom = (m0 - m_inf)
-            if not np.isfinite(denom) or abs(denom) < eps:
-                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-            alpha = (m0 - m) / denom
-        else:
-            denom = (m_inf - m0)
-            if not np.isfinite(denom) or abs(denom) < eps:
-                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-            alpha = (m - m0) / denom
 
-        alpha = np.clip(alpha, 0.0, 1.0)
-        w = np.clip(1.0 - alpha, 1e-12, 1.0)
+        if conversion_basis == "alpha":
+            N = m.size
+            k_head = max(3, int(round(head_frac * N)))
+            k_tail = max(3, int(round(tail_frac * N)))
+            m0 = float(np.nanmedian(m[:k_head]))
+            m_inf = float(np.nanmedian(m[-k_tail:]))
+
+            loss = (m[-1] < m[0])
+            if loss:
+                denom = (m0 - m_inf)
+                if not np.isfinite(denom) or abs(denom) < eps:
+                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                X_conv = (m0 - m) / denom
+            else:
+                denom = (m_inf - m0)
+                if not np.isfinite(denom) or abs(denom) < eps:
+                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                X_conv = (m - m0) / denom
+            X_conv = np.clip(X_conv, 0.0, 1.0)
+
+        elif conversion_basis == "carbon":
+            af = _resolve_ash_fraction(feedstock, ash_fraction)
+            m0_top = float(np.nanmax(m))
+            denom = m0_top * (1.0 - af)
+            if not np.isfinite(denom) or abs(denom) < eps:
+                continue
+            X_conv = (m0_top - m) / denom
+            X_conv = np.clip(X_conv, 0.0, 1.0)
+
+        else:
+            continue
+
+        w = np.clip(1.0 - X_conv, 1e-12, 1.0)
 
         mask = (
-                np.isfinite(T_K) & (T_K > 0) &
-                np.isfinite(alpha) &
-                (alpha > a_low) & (alpha < a_high)
+            np.isfinite(T_K) & (T_K > 0) &
+            np.isfinite(X_conv) & (X_conv > float(lo)) & (X_conv < float(hi)) &
+            np.isfinite(w)
         )
-        if mask.sum() < 3:
+        if int(np.sum(mask)) < 3:
             continue
 
         T_fit = T_K[mask]
         w_fit = w[mask]
+
         if abs(n_s - 1.0) < 1e-12:
             g = -np.log(w_fit)
         else:
@@ -742,18 +990,21 @@ def estimate_global_coats_redfern_with_o2(
         zv = np.log(float(yO2)) * np.ones_like(x)
 
         mm = np.isfinite(x) & np.isfinite(yv) & np.isfinite(zv)
-        x_plot.append(x[mm])
-        y_plot.append(yv[mm])
-        z_plot.append(zv[mm])
+        if int(np.sum(mm)) < 1:
+            continue
 
-    x_plot = np.concatenate(x_plot) if x_plot else np.array([], dtype=float)
-    y_plot = np.concatenate(y_plot) if y_plot else np.array([], dtype=float)
-    z_plot = np.concatenate(z_plot) if z_plot else np.array([], dtype=float)
+        x_plot_list.append(x[mm])
+        y_plot_list.append(yv[mm])
+        z_plot_list.append(zv[mm])
+
+    x_plot = np.concatenate(x_plot_list) if x_plot_list else np.array([], dtype=float)
+    y_plot = np.concatenate(y_plot_list) if y_plot_list else np.array([], dtype=float)
+    z_plot = np.concatenate(z_plot_list) if z_plot_list else np.array([], dtype=float)
 
     return GlobalCR_O2_Result(
         label=label,
         n_solid=n_s,
-        alpha_range=(float(a_low), float(a_high)),
+        alpha_range=(float(lo), float(hi)),  # keep field name for backwards compatibility
         time_window=(float(t0), float(t1)),
         beta_K_per_time=beta_used,
         E_A_J_per_mol=float(E_A),
@@ -769,6 +1020,7 @@ def estimate_global_coats_redfern_with_o2(
         z_lnO2_all=z_plot,
         y_all=y_plot,
     )
+
 
 
 def simulate_alpha_ramp(
@@ -855,6 +1107,7 @@ def alpha_to_mass_pct(alpha: np.ndarray, m0: float, m_inf: float, *, loss: bool 
         return m0 - a * (m0 - m_inf)
     else:
         return m0 + a * (m_inf - m0)
+
 
 ####
 # Old, unused code, kept for reference
