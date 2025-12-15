@@ -351,129 +351,178 @@ def _compute_conversion_and_w(
 ####
 # Isothermal holds rate constant over the segment.
 def estimate_segment_rate_first_order(
-        df: pd.DataFrame,
-        time_window: tuple[float, float],
-        *,
-        time_col: str = "time_min",
-        temp_col: str = "temp_C",
-        mass_col: str = "mass_pct",
-        label: str | None = None,
-        # Conversion options
-        conversion_basis: ConversionBasis = "alpha",  # either "alpha" or "carbon"
-        feedstock: Optional[str] = None,  # feedstock name if using carbon conversion
-        ash_fraction: Optional[float] = None,  # if provided, will override feedstock for ash fraction
-        conversion_range: Optional[Tuple[float, float]] = None,  # filtering on conversion range
-        alpha_range: tuple[float, float] = (0.10, 0.80),  # legacy support
-        # Isothermal hold settings
-        n_solid: float = 1.0,  # solid reaction order used in g(w)
+    df: pd.DataFrame,
+    *,
+    time_window: Tuple[float, float],
+    time_col: str = "time_min",
+    temp_col: str = "temp_C",
+    mass_col: str = "mass_pct",
+    label: Optional[str] = None,
+    # conversion handling
+    conversion_basis: str = "alpha",  # "alpha" or "carbon"
+    ash_fraction: Optional[float] = None,  # required for carbon basis unless you hardcode elsewhere
+    conversion_range: Optional[Tuple[float, float]] = None,  # overrides alpha_range if provided
+    alpha_range: Tuple[float, float] = (0.10, 0.80),
+    # robust reference points inside window
+    head_frac: float = 0.10,
+    tail_frac: float = 0.20,
+    # alpha normalization behavior
+    normalize_within_window: bool = False,
 ) -> SegmentRate:
     """
-    Estimate k (rate constant) from an isothermal segment using first-order kinetics.
+    FIRST-ORDER (solid) isothermal estimation.
+    Fits ln(w) vs time inside the window:
+        ln(w) = ln(w0) − k * t  => slope = −k
 
-    Conversion can be computed as either:
-      - "alpha" (classic conversion)
-      - "carbon" (based on mass% and ash correction)
+    conversion_basis="alpha":
+      - normalize_within_window=True:
+          X = (m0 − m)/(m0 − m_inf)  (or gain variant), w = 1 − X
+      - normalize_within_window=False:
+          w = m/m0_start (capped at 1), X = 1 − w
 
-    For "carbon", ash fraction must be provided (or inferred from feedstock).
+    conversion_basis="carbon":
+      m0 = max(mass%) inside the time window (always)
+      Xc = (m0 − m)/(m0*(1-ash_fraction)), w = 1 − Xc
 
-    Parameters:
-      - conversion_range: limits the conversion range [0, 1] for filtering.
+    Safeguards:
+      - If requested conversion_range is not covered in the window -> raises ValueError
+      - If partially covered -> warns and clips to the overlap
     """
+    import warnings
+
+    if label is None:
+        label = "segment"
+
     t0, t1 = time_window
+    sel = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
+    if sel.empty:
+        raise ValueError(f"No data in time window {time_window}.")
 
-    # --- Prepare and filter the dataset ---
-    seg = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
-    seg[time_col] = pd.to_numeric(seg[time_col], errors="coerce")
-    seg[temp_col] = pd.to_numeric(seg[temp_col], errors="coerce")
-    seg[mass_col] = pd.to_numeric(seg[mass_col], errors="coerce")
-    seg = seg.dropna(subset=[time_col, temp_col, mass_col]).sort_values(time_col)
-    if seg.shape[0] < 5:
-        raise ValueError("Segment is too short after filtering.")
+    # numeric + sort
+    sel[time_col] = pd.to_numeric(sel[time_col], errors="coerce")
+    sel[temp_col] = pd.to_numeric(sel[temp_col], errors="coerce")
+    sel[mass_col] = pd.to_numeric(sel[mass_col], errors="coerce")
+    sel = sel.dropna(subset=[time_col, temp_col, mass_col]).sort_values(time_col)
+    if sel.shape[0] < 5:
+        raise ValueError(f"Too few points ({sel.shape[0]}) in time window {time_window}.")
 
-    # --- Get time, temperature, and mass data ---
-    t = seg[time_col].to_numpy(dtype=float)
-    T_K = seg[temp_col].to_numpy(dtype=float) + 273.15  # Convert to Kelvin
-    m = seg[mass_col].to_numpy(dtype=float)
+    t = sel[time_col].to_numpy(dtype=float)
+    T_K = sel[temp_col].to_numpy(dtype=float) + 273.15
+    m = sel[mass_col].to_numpy(dtype=float)
 
-    # --- Conversion and mass calculation ---
-    eps = 1e-12  # Small value for safety in division
+    # rebase time to start of window
+    t_rel = t - t[0]
 
-    # Compute conversion based on selected basis
+    eps = 1e-12
+    n = m.size
+    k_head = max(3, int(round(head_frac * n)))
+    k_tail = max(3, int(round(tail_frac * n)))
+
+    # robust start/end masses inside the time window
+    m0_start = float(np.nanmedian(m[:k_head]))
+    m_inf = float(np.nanmedian(m[-k_tail:]))
+
+    # ---- compute X (conversion) and w (remaining fraction) ----
+    conversion_basis = str(conversion_basis).lower().strip()
+
     if conversion_basis == "alpha":
-        # Robust m0 and m_inf within the segment window
-        N = m.size
-        k_head = max(3, int(round(0.10 * N)))
-        k_tail = max(3, int(round(0.20 * N)))
-        m0 = float(np.nanmedian(m[:k_head]))  # m0 = max mass% in the initial part of the segment
-        m_inf = float(np.nanmedian(m[-k_tail:]))  # m_inf = min mass% in the final part of the segment
+        if normalize_within_window:
+            # old behavior: scale by the span inside the time window
+            loss = (m_inf < m0_start)
+            if loss:
+                denom = (m0_start - m_inf)
+                if not np.isfinite(denom) or abs(denom) < eps:
+                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                X = (m0_start - m) / denom
+            else:
+                denom = (m_inf - m0_start)
+                if not np.isfinite(denom) or abs(denom) < eps:
+                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                X = (m - m0_start) / denom
 
-        # Determine if it's a mass loss or gain
-        loss = (m[-1] < m[0])
-        if loss:
-            denom = (m0 - m_inf)
-            if not np.isfinite(denom) or abs(denom) < eps:
-                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-            alpha = (m0 - m) / denom
+            X = np.clip(X, 0.0, 1.0)
+            w = np.clip(1.0 - X, 1e-12, 1.0)
         else:
-            denom = (m_inf - m0)
-            if not np.isfinite(denom) or abs(denom) < eps:
-                denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-            alpha = (m - m0) / denom
-
-        alpha = np.clip(alpha, 0.0, 1.0)
-        w = np.clip(1.0 - alpha, 1e-12, 1.0)
+            # requested behavior: 100% mass at window start, no forced 100% conversion
+            if not np.isfinite(m0_start) or abs(m0_start) < eps:
+                raise ValueError("Invalid m0_start in time window.")
+            w = m / m0_start
+            w = np.clip(w, 1e-12, np.inf)
+            w = np.minimum(w, 1.0)  # cap mass gain -> X=0 there
+            X = np.clip(1.0 - w, 0.0, 1.0)
 
     elif conversion_basis == "carbon":
-        # Carbon conversion calculation: X_C = (m0 - m_t) / (m0 * (1 - ash_fraction))
-        af = _resolve_ash_fraction(feedstock, ash_fraction)  # Default for feedstock or passed fraction
-        m0_top = float(np.nanmax(m))  # top-point mass% in the selected time window
+        if ash_fraction is None or (not np.isfinite(float(ash_fraction))):
+            raise ValueError("ash_fraction must be provided for conversion_basis='carbon'.")
+
+        af = float(ash_fraction)
+
+        # IMPORTANT: m0 is highest point inside THIS time window
+        m0_top = float(np.nanmax(m))
+        if not np.isfinite(m0_top) or abs(m0_top) < eps:
+            raise ValueError("Invalid m0_top in time window for carbon conversion.")
+
         denom = m0_top * (1.0 - af)
-
         if not np.isfinite(denom) or abs(denom) < eps:
-            raise ValueError("Invalid denominator for X_C. Check ash_fraction and mass window.")
+            raise ValueError("Invalid denominator for carbon conversion (check ash_fraction).")
 
-        X_C = (m0_top - m) / denom  # X_C conversion
-        X_C = np.clip(X_C, 0.0, 1.0)
-        w = np.clip(1.0 - X_C, 1e-12, 1.0)
+        X = (m0_top - m) / denom
+        X = np.clip(X, 0.0, 1.0)
+        w = np.clip(1.0 - X, 1e-12, 1.0)
 
     else:
-        raise ValueError(f"Unknown conversion_basis: {conversion_basis}")
+        raise ValueError(f"Unknown conversion_basis: {conversion_basis!r} (use 'alpha' or 'carbon').")
 
-    # --- Optional conversion window filtering ---
-    if conversion_range is not None:
-        lo, hi = conversion_range
-        mask = (X_C >= lo) & (X_C <= hi) if conversion_basis == "carbon" else (alpha >= lo) & (alpha <= hi)
-        t = t[mask]
-        w = w[mask]
-        T_K = T_K[mask]
+    # ---- apply conversion-range safeguards ----
+    lo_req, hi_req = (conversion_range if conversion_range is not None else alpha_range)
 
-    # --- Fit the first-order solid kinetics model ---
-    x = t.astype(float)
-    y = np.log(w)
+    X_min = float(np.nanmin(X))
+    X_max = float(np.nanmax(X))
 
-    # mask finite
-    mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(T_K) & (T_K > 0)
-    x = x[mask]
-    y = y[mask]
-    T_K = T_K[mask]
+    lo_eff = max(float(lo_req), X_min)
+    hi_eff = min(float(hi_req), X_max)
 
-    if x.size < 3:
-        raise ValueError("Insufficient finite points after masking for ln(1−α) vs t fit.")
+    if hi_eff <= lo_eff:
+        raise ValueError(
+            f"{label}: requested conversion range [{lo_req:.2f},{hi_req:.2f}] not covered in time_window "
+            f"(available [{X_min:.2f},{X_max:.2f}])."
+        )
 
-    # --- Perform linear regression (OLS) for k ---
+    if (lo_eff > float(lo_req) + 1e-12) or (hi_eff < float(hi_req) - 1e-12):
+        warnings.warn(
+            f"{label}: requested conversion range [{lo_req:.2f},{hi_req:.2f}] only partially covered "
+            f"(available [{X_min:.2f},{X_max:.2f}]); using [{lo_eff:.2f},{hi_eff:.2f}] for this fit."
+        )
+
+    mask = np.isfinite(t_rel) & np.isfinite(w) & np.isfinite(T_K) & (T_K > 0) & (X > lo_eff) & (X < hi_eff)
+    if int(np.sum(mask)) < 3:
+        raise ValueError(f"{label}: insufficient points after conversion filtering.")
+
+    x = t_rel[mask].astype(float)
+    y = np.log(w[mask].astype(float))  # ln(w) = ln(w0) - k*t
+    T_use = T_K[mask].astype(float)
+
     slope, intercept, r2 = _linear_fit(x, y)
+    k = float(-slope)  # k >= 0 ideally
 
-    # Return k and other parameters
-    k = -slope
+    if not np.isfinite(k):
+        raise ValueError(f"{label}: could not estimate k (non-finite slope).")
+    if k < 0:
+        # keep it non-negative to avoid nonsense downstream
+        k = 0.0
+
     return SegmentRate(
-        k=k,
-        slope=slope,
-        intercept=intercept,
-        r2=r2,
-        alpha=alpha,
-        conversion_basis=conversion_basis,
-        label=label
+        label=str(label),
+        T_mean_K=float(np.nanmean(T_use)),
+        T_span_K=float(np.nanmax(T_use) - np.nanmin(T_use)),
+        r_abs=float(k),                 # for first-order: r_abs stores k (1/time)
+        slope_signed=float(slope),      # slope of ln(w) vs t (should be ~ -k)
+        intercept=float(intercept),     # ln(w0)
+        r2_mass_vs_time=float(r2),      # name kept for backward compat
+        n_points=int(x.size),
+        time_window=(float(t0), float(t1)),
     )
+
 
 
 def estimate_arrhenius_from_segments(
