@@ -4,6 +4,8 @@ from typing import Optional, Tuple, List, Sequence, Dict, Any, Literal
 import numpy as np
 import pandas as pd
 import math
+import warnings
+
 
 R_DEFAULT = 8.314462618  # J/mol/K
 
@@ -715,15 +717,19 @@ def estimate_global_coats_redfern_with_o2(
     *,
     time_window: tuple[float, float],
     n_solid: float = 1.0,  # solid reaction order used in g(w)
-    alpha_range: tuple[float, float] = (0.10, 0.80),
+    alpha_range: tuple[float, float] = (0.10, 0.80),  # legacy name (used if conversion_range=None)
     beta_fixed_K_per_time: float = 3.0,  # 3 K/min if time is minutes
     # columns
     time_col: str = "time_min",
     temp_col: str = "temp_C",
     mass_col: str = "mass_pct",
-    # conversion normalization inside window (alpha basis only)
+    # alpha normalization parameters (within time_window)
     head_frac: float = 0.10,
     tail_frac: float = 0.20,
+    # NEW: alpha normalization behavior
+    # True  -> old behavior: alpha scaled by (m0 - m_inf) within the time_window (can force 0→1 inside window)
+    # False -> window-start mass is 100%: w = m/m0_start, X = 1-w (does NOT force 100% conversion)
+    normalize_within_window: bool = False,
     # oxygen order handling
     m_o2_fixed: float | None = None,  # set to 1.0 if you want to force O2 order
     # fit options
@@ -731,10 +737,10 @@ def estimate_global_coats_redfern_with_o2(
     R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
     label: str | None = None,
     enforce_non_negative: bool = True,
-    conversion_basis: ConversionBasis = "alpha",
+    conversion_basis: ConversionBasis = "alpha",  # "alpha" or "carbon"
     feedstock: Optional[str] = None,
     ash_fraction: Optional[float] = None,
-    conversion_range: Optional[Tuple[float, float]] = None,
+    conversion_range: Optional[Tuple[float, float]] = None,  # preferred over alpha_range
 ):
     """
     Global Coats–Redfern fit across multiple linear-heating ramps at different O2 fractions.
@@ -742,33 +748,48 @@ def estimate_global_coats_redfern_with_o2(
     Model:
         y = ln(g(w)/T^2) = ln(A*R/(beta*Ea)) + m*ln(yO2) - Ea/R * (1/T)
 
-    Notes:
-      - conversion_basis="alpha": alpha computed from mass% using m0/m_inf in the selected time window.
-      - conversion_basis="carbon": X_C computed from raw mass% using
-            X_C = (m0_top - m) / (m0_top*(1-ash_fraction)),
-        where m0_top = max(mass%) in the selected time window.
-      - Filtering uses conversion_range if provided, otherwise falls back to alpha_range
-        (so old calls keep working).
+    Conversion handling:
+      - basis="alpha":
+          * normalize_within_window=True:
+              X = (m0 - m)/(m0 - m_inf)   (or gain variant)
+          * normalize_within_window=False:
+              w = m/m0_start (capped at 1); X = 1 - w
+      - basis="carbon":
+          * m0 is ALWAYS the highest mass% inside the time window:
+              Xc = (m0_top - m)/(m0_top*(1-ash_fraction))
+              w  = 1 - Xc
+    Safeguards:
+      - If requested conversion_range (or alpha_range) is not present in the time_window, warn and skip that dataset.
+      - If partially present, warn and fit only the overlapping range.
+      - Requires >=2 usable datasets after filtering.
     """
+    import warnings
+
     if len(dfs) != len(o2_fractions):
         raise ValueError("dfs and o2_fractions must have the same length.")
     if len(dfs) < 2:
         raise ValueError("Need at least 2 datasets (preferably 3: 5%,10%,20%).")
 
     t0, t1 = time_window
-    lo, hi = conversion_range if conversion_range is not None else alpha_range
+    lo_req, hi_req = (conversion_range if conversion_range is not None else alpha_range)
     n_s = float(n_solid)
 
-    X_blocks = []
-    y_blocks = []
+    X_blocks: list[np.ndarray] = []
+    y_blocks: list[np.ndarray] = []
     counts: list[int] = []
 
-    for df, yO2 in zip(dfs, o2_fractions):
+    # --------------------------
+    # FIT LOOP (with warnings)
+    # --------------------------
+    for idx, (df, yO2) in enumerate(zip(dfs, o2_fractions), start=1):
+        ds_id = f"{label or 'CR'} dataset #{idx} (O2={float(yO2):g})"
+
         if not (np.isfinite(yO2) and yO2 > 0):
             raise ValueError("All o2_fractions must be finite and > 0.")
 
         seg = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
         if seg.empty:
+            warnings.warn(f"{ds_id}: empty time_window, skipping.")
             counts.append(0)
             continue
 
@@ -776,7 +797,9 @@ def estimate_global_coats_redfern_with_o2(
         seg[temp_col] = pd.to_numeric(seg[temp_col], errors="coerce")
         seg[mass_col] = pd.to_numeric(seg[mass_col], errors="coerce")
         seg = seg.dropna(subset=[time_col, temp_col, mass_col]).sort_values(time_col)
+
         if seg.shape[0] < 5:
+            warnings.warn(f"{ds_id}: <5 points in time_window, skipping.")
             counts.append(0)
             continue
 
@@ -784,64 +807,105 @@ def estimate_global_coats_redfern_with_o2(
         m = seg[mass_col].to_numpy(dtype=float)
 
         eps = 1e-12
+        N = m.size
+        k_head = max(3, int(round(head_frac * N)))
+        k_tail = max(3, int(round(tail_frac * N)))
 
-        # --- compute conversion X and remaining fraction w = 1 - X ---
+        # robust start / end masses (within time_window)
+        m0_start = float(np.nanmedian(m[:k_head]))
+        m_inf = float(np.nanmedian(m[-k_tail:]))
+
+        # --- compute conversion X_conv and remaining fraction w = 1 - X_conv ---
         if conversion_basis == "alpha":
-            # robust m0 and m_inf within the window
-            N = m.size
-            k_head = max(3, int(round(head_frac * N)))
-            k_tail = max(3, int(round(tail_frac * N)))
-            m0 = float(np.nanmedian(m[:k_head]))
-            m_inf = float(np.nanmedian(m[-k_tail:]))
+            if normalize_within_window:
+                # old behavior: scale by window span (can force X→1 by definition)
+                loss = (m_inf < m0_start)
+                if loss:
+                    denom = (m0_start - m_inf)
+                    if not np.isfinite(denom) or abs(denom) < eps:
+                        denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                    X_conv = (m0_start - m) / denom
+                else:
+                    denom = (m_inf - m0_start)
+                    if not np.isfinite(denom) or abs(denom) < eps:
+                        denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                    X_conv = (m - m0_start) / denom
 
-            # loss vs gain
-            loss = (m[-1] < m[0])
+                X_conv = np.clip(X_conv, 0.0, 1.0)
+                w = np.clip(1.0 - X_conv, 1e-12, 1.0)
 
-            if loss:
-                denom = (m0 - m_inf)
-                if not np.isfinite(denom) or abs(denom) < eps:
-                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-                X_conv = (m0 - m) / denom
             else:
-                denom = (m_inf - m0)
-                if not np.isfinite(denom) or abs(denom) < eps:
-                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-                X_conv = (m - m0) / denom
-
-            X_conv = np.clip(X_conv, 0.0, 1.0)
+                # requested behavior: 100% mass at window start, no scaling to 1 at window end
+                if not np.isfinite(m0_start) or abs(m0_start) < eps:
+                    warnings.warn(f"{ds_id}: invalid m0_start, skipping.")
+                    counts.append(0)
+                    continue
+                w = m / m0_start
+                # if there is minor mass gain, cap at 1 -> X=0 there
+                w = np.clip(w, 1e-12, np.inf)
+                w = np.minimum(w, 1.0)
+                X_conv = np.clip(1.0 - w, 0.0, 1.0)
 
         elif conversion_basis == "carbon":
-            af = _resolve_ash_fraction(feedstock, ash_fraction)  # your helper/defaults
-            m0_top = float(np.nanmax(m))  # top-point in THIS window
+            # m0 for carbon conversion = highest mass% inside THIS time window (always)
+            af = _resolve_ash_fraction(feedstock, ash_fraction)
+            m0_top = float(np.nanmax(m))
+            if not np.isfinite(m0_top) or abs(m0_top) < eps:
+                warnings.warn(f"{ds_id}: invalid m0_top for carbon basis, skipping.")
+                counts.append(0)
+                continue
+
             denom = m0_top * (1.0 - af)
             if not np.isfinite(denom) or abs(denom) < eps:
-                raise ValueError("Invalid denominator for X_C. Check ash_fraction and mass window.")
+                warnings.warn(f"{ds_id}: invalid X_C denominator (ash_fraction?), skipping.")
+                counts.append(0)
+                continue
+
             X_conv = (m0_top - m) / denom
             X_conv = np.clip(X_conv, 0.0, 1.0)
+            w = np.clip(1.0 - X_conv, 1e-12, 1.0)
 
         else:
             raise ValueError(f"Unknown conversion_basis: {conversion_basis}")
 
-        w = np.clip(1.0 - X_conv, 1e-12, 1.0)
+        # --- safeguard: requested conversion range vs available conversion in this window ---
+        X_min = float(np.nanmin(X_conv))
+        X_max = float(np.nanmax(X_conv))
 
-        # --- filter by conversion range on X (alpha OR Xc) ---
+        lo_eff = max(float(lo_req), X_min)
+        hi_eff = min(float(hi_req), X_max)
+
+        if hi_eff <= lo_eff:
+            warnings.warn(
+                f"{ds_id}: requested conversion range [{lo_req:.2f},{hi_req:.2f}] not covered in time_window "
+                f"(available [{X_min:.2f},{X_max:.2f}]). Skipping this dataset."
+            )
+            counts.append(0)
+            continue
+
+        if (lo_eff > float(lo_req) + 1e-12) or (hi_eff < float(hi_req) - 1e-12):
+            warnings.warn(
+                f"{ds_id}: requested conversion range [{lo_req:.2f},{hi_req:.2f}] only partially covered "
+                f"(available [{X_min:.2f},{X_max:.2f}]); using [{lo_eff:.2f},{hi_eff:.2f}] for this dataset."
+            )
+
         mask = (
             np.isfinite(T_K) & (T_K > 0) &
-            np.isfinite(X_conv) & (X_conv > float(lo)) & (X_conv < float(hi)) &
+            np.isfinite(X_conv) & (X_conv > lo_eff) & (X_conv < hi_eff) &
             np.isfinite(w)
         )
         if int(np.sum(mask)) < 3:
+            warnings.warn(f"{ds_id}: <3 points after conversion filtering, skipping.")
             counts.append(0)
             continue
 
         T_fit = T_K[mask]
         w_fit = w[mask]
 
-        # --- g(w) for chosen solid order ---
+        # g(w) for chosen solid order
         if abs(n_s - 1.0) < 1e-12:
             g = -np.log(w_fit)
         else:
-            # consistent with your existing implementation
             g = (np.power(w_fit, 1.0 - n_s) - 1.0) / (n_s - 1.0)
 
         x_invT = 1.0 / T_fit
@@ -853,12 +917,13 @@ def estimate_global_coats_redfern_with_o2(
         y_cr = y_cr[mm]
         z_lnO2 = z_lnO2[mm]
 
-        counts.append(int(x_invT.size))
-        if x_invT.size < 3:
+        npts = int(x_invT.size)
+        counts.append(npts)
+        if npts < 3:
+            warnings.warn(f"{ds_id}: <3 finite points after final masking, skipping.")
             continue
 
-        # Design matrix:
-        # y = b0 + b1*lnO2 + b2*(1/T)
+        # Design matrix: y = b0 + b1*lnO2 + b2*(1/T)
         if m_o2_fixed is not None:
             y_adj = y_cr - float(m_o2_fixed) * z_lnO2
             Xmat = np.column_stack([np.ones_like(x_invT), x_invT])
@@ -866,9 +931,8 @@ def estimate_global_coats_redfern_with_o2(
             Xmat = np.column_stack([np.ones_like(x_invT), z_lnO2, x_invT])
             y_adj = y_cr
 
-        # Optional: equal weight per dataset
         if equal_weight_per_dataset:
-            wgt = 1.0 / max(1, x_invT.size)
+            wgt = 1.0 / max(1, npts)
             sw = math.sqrt(wgt)
             Xmat = Xmat * sw
             y_adj = y_adj * sw
@@ -876,13 +940,19 @@ def estimate_global_coats_redfern_with_o2(
         X_blocks.append(Xmat)
         y_blocks.append(y_adj)
 
-    if not X_blocks:
-        raise ValueError("No usable points found. Check time_window and conversion_range/alpha_range.")
+    n_used = sum(c > 0 for c in counts)
+    if n_used < 2 or (not X_blocks):
+        raise ValueError(
+            f"Global CR fit needs >=2 usable datasets, but only {n_used} were usable after filtering. "
+            f"Try widening conversion_range/alpha_range or adjusting time_window."
+        )
 
+    # --------------------------
+    # OLS fit (global)
+    # --------------------------
     X_all = np.vstack(X_blocks)
     y_all_fit = np.concatenate(y_blocks)
 
-    # OLS via lstsq
     beta, *_ = np.linalg.lstsq(X_all, y_all_fit, rcond=None)
     yhat = X_all @ beta
     ss_res = float(np.sum((y_all_fit - yhat) ** 2))
@@ -902,18 +972,18 @@ def estimate_global_coats_redfern_with_o2(
     if enforce_non_negative and (not np.isfinite(E_A) or E_A < 0):
         E_A = 0.0
 
-    # Coats–Redfern intercept relation:
-    # b0 = ln(A*R/(beta*Ea))  -> A = (beta*Ea/R)*exp(b0)
+    # b0 = ln(A*R/(beta*Ea)) -> A = (beta*Ea/R)*exp(b0)
     beta_used = float(beta_fixed_K_per_time)
     if np.isfinite(b0) and np.isfinite(E_A) and E_A > 0 and beta_used > 0:
         A = float((beta_used * E_A / R) * math.exp(b0))
     else:
         A = float("nan")
-
     if enforce_non_negative and (not np.isfinite(A) or A < 0):
         A = 0.0
 
-    # --- rebuild UNWEIGHTED points for plotting (consistent with conversion_basis) ---
+    # --------------------------
+    # Rebuild unweighted points for plotting (NO warnings)
+    # --------------------------
     x_plot_list: list[np.ndarray] = []
     y_plot_list: list[np.ndarray] = []
     z_plot_list: list[np.ndarray] = []
@@ -934,44 +1004,61 @@ def estimate_global_coats_redfern_with_o2(
         m = seg[mass_col].to_numpy(dtype=float)
 
         eps = 1e-12
+        N = m.size
+        k_head = max(3, int(round(head_frac * N)))
+        k_tail = max(3, int(round(tail_frac * N)))
+
+        m0_start = float(np.nanmedian(m[:k_head]))
+        m_inf = float(np.nanmedian(m[-k_tail:]))
 
         if conversion_basis == "alpha":
-            N = m.size
-            k_head = max(3, int(round(head_frac * N)))
-            k_tail = max(3, int(round(tail_frac * N)))
-            m0 = float(np.nanmedian(m[:k_head]))
-            m_inf = float(np.nanmedian(m[-k_tail:]))
-
-            loss = (m[-1] < m[0])
-            if loss:
-                denom = (m0 - m_inf)
-                if not np.isfinite(denom) or abs(denom) < eps:
-                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-                X_conv = (m0 - m) / denom
+            if normalize_within_window:
+                loss = (m_inf < m0_start)
+                if loss:
+                    denom = (m0_start - m_inf)
+                    if not np.isfinite(denom) or abs(denom) < eps:
+                        denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                    X_conv = (m0_start - m) / denom
+                else:
+                    denom = (m_inf - m0_start)
+                    if not np.isfinite(denom) or abs(denom) < eps:
+                        denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
+                    X_conv = (m - m0_start) / denom
+                X_conv = np.clip(X_conv, 0.0, 1.0)
+                w = np.clip(1.0 - X_conv, 1e-12, 1.0)
             else:
-                denom = (m_inf - m0)
-                if not np.isfinite(denom) or abs(denom) < eps:
-                    denom = float(np.nanmax(m) - np.nanmin(m)) or 1.0
-                X_conv = (m - m0) / denom
-            X_conv = np.clip(X_conv, 0.0, 1.0)
+                if not np.isfinite(m0_start) or abs(m0_start) < eps:
+                    continue
+                w = m / m0_start
+                w = np.clip(w, 1e-12, np.inf)
+                w = np.minimum(w, 1.0)
+                X_conv = np.clip(1.0 - w, 0.0, 1.0)
 
         elif conversion_basis == "carbon":
             af = _resolve_ash_fraction(feedstock, ash_fraction)
             m0_top = float(np.nanmax(m))
+            if not np.isfinite(m0_top) or abs(m0_top) < eps:
+                continue
             denom = m0_top * (1.0 - af)
             if not np.isfinite(denom) or abs(denom) < eps:
                 continue
             X_conv = (m0_top - m) / denom
             X_conv = np.clip(X_conv, 0.0, 1.0)
+            w = np.clip(1.0 - X_conv, 1e-12, 1.0)
 
         else:
             continue
 
-        w = np.clip(1.0 - X_conv, 1e-12, 1.0)
+        X_min = float(np.nanmin(X_conv))
+        X_max = float(np.nanmax(X_conv))
+        lo_eff = max(float(lo_req), X_min)
+        hi_eff = min(float(hi_req), X_max)
+        if hi_eff <= lo_eff:
+            continue
 
         mask = (
             np.isfinite(T_K) & (T_K > 0) &
-            np.isfinite(X_conv) & (X_conv > float(lo)) & (X_conv < float(hi)) &
+            np.isfinite(X_conv) & (X_conv > lo_eff) & (X_conv < hi_eff) &
             np.isfinite(w)
         )
         if int(np.sum(mask)) < 3:
@@ -1004,9 +1091,9 @@ def estimate_global_coats_redfern_with_o2(
     return GlobalCR_O2_Result(
         label=label,
         n_solid=n_s,
-        alpha_range=(float(lo), float(hi)),  # keep field name for backwards compatibility
+        alpha_range=(float(lo_req), float(hi_req)),  # kept for backwards compatibility
         time_window=(float(t0), float(t1)),
-        beta_K_per_time=beta_used,
+        beta_K_per_time=float(beta_used),
         E_A_J_per_mol=float(E_A),
         A=float(A),
         m_o2=float(b1),
@@ -1014,12 +1101,14 @@ def estimate_global_coats_redfern_with_o2(
         coef_lnO2=float(b1),
         coef_invT=float(b2),
         r2=float(r2),
-        n_points=int(np.sum(np.isfinite(x_plot) & np.isfinite(y_plot))),
+        n_points=int(x_plot.size),
         dataset_point_counts=counts,
         x_invT_all=x_plot,
         z_lnO2_all=z_plot,
         y_all=y_plot,
     )
+
+
 
 
 

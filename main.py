@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from tg_loader import load_all_thermogravimetric_data, SPEC
+from tg_math import estimate_global_coats_redfern_with_o2
+from tg_plotting import plot_global_coats_redfern_o2_fit
 
 ODIN_PATH = "./TG_Data/Odin Data/"
 SIF_PATH = "./TG_Data/Sif Data/"
@@ -68,6 +70,45 @@ pw_20o2_linear = data["PW"]["linear"]["20%"]
 #####
 # Parse Segments
 #####
+
+# global fit BRF
+res_global_fit_brf = estimate_global_coats_redfern_with_o2(
+    [brf_10o2_linear, brf_20o2_linear],
+    o2_fractions=[0.10, 0.20],
+    time_window=(32.0, 195.0),      # ramp region
+    n_solid=1.0,                   # 1st order in solid assumption
+    alpha_range=(0.20, 0.80),
+    beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
+    label="BRF linear heating ramps global O2 fit",
+)
+plot_global_coats_redfern_o2_fit(res_global_fit_brf, save_path="brf_global_cr", title="BRF global CR fit")
+
+
+# global fit WS
+res_global_fit_ws = estimate_global_coats_redfern_with_o2(
+    [ws_5o2_linear, ws_10o2_linear, ws_20o2_linear],
+    o2_fractions=[0.05, 0.10, 0.20],
+    time_window=(32.0, 195.0),      # ramp region
+    n_solid=1.0,                   # 1st order in solid assumption
+    alpha_range=(0.20, 0.80),
+    beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
+    label="WS linear heating ramps global O2 fit",
+)
+plot_global_coats_redfern_o2_fit(res_global_fit_ws, save_path="ws_global_cr", title="WS global CR fit")
+
+
+# global fit PW
+res_global_fit_pw = estimate_global_coats_redfern_with_o2(
+    [pw_5o2_linear, pw_10o2_linear, pw_20o2_linear],
+    o2_fractions=[0.05, 0.10, 0.20],
+    time_window=(32.0, 195.0),      # ramp region
+    n_solid=1.0,                   # 1st order in solid assumption
+    alpha_range=(0.20, 0.80),
+    beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
+    label="PW linear heating ramps global O2 fit",
+)
+plot_global_coats_redfern_o2_fit(res_global_fit_pw, save_path="pw_global_cr", title="PW global CR fit")
+
 
 # BRF
 """
