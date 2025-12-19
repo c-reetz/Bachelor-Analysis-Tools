@@ -812,7 +812,6 @@ def estimate_global_coats_redfern_with_o2(
       - If partially present, warn and fit only the overlapping range.
       - Requires >=2 usable datasets after filtering.
     """
-    import warnings
 
     if len(dfs) != len(o2_fractions):
         raise ValueError("dfs and o2_fractions must have the same length.")
@@ -1245,6 +1244,108 @@ def alpha_to_mass_pct(alpha: np.ndarray, m0: float, m_inf: float, *, loss: bool 
         return m0 - a * (m0 - m_inf)
     else:
         return m0 + a * (m_inf - m0)
+
+def compute_dtg_curve(
+    df: pd.DataFrame,
+    *,
+    time_window: tuple[float, float] | None = None,
+    time_col: str = "time_min",
+    temp_col: str = "temp_C",
+    mass_col: str = "mass_pct",
+    smooth_window: int = 0,
+    beta_min: float = 1e-6,
+    drop_invalid: bool = True,
+) -> pd.DataFrame:
+    """
+    Compute DTG (derivative thermogravimetry) for a TG dataset.
+
+    Returns a DataFrame (time-ordered) with columns:
+      - time_min
+      - temp_C
+      - mass_pct
+      - dm_dt              [mass% / time-unit]
+      - beta_dT_dt         [°C / time-unit]
+      - dm_dT              [mass% / °C]
+      - dtg_loss           [-dm/dT, mass% / °C]  (positive for mass loss)
+
+    Notes:
+      - DTG is only meaningful when temperature is changing (beta_dT_dt not ~0).
+        Points with |beta_dT_dt| < beta_min are set to NaN in dm_dT/dtg_loss.
+      - If you pass a time_window, normalization/slicing is strictly inside that window.
+      - smooth_window (odd int recommended, e.g. 7, 11) applies a moving-average
+        to mass and temperature *before* differentiation to reduce derivative noise.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if time_window is not None:
+        t0, t1 = time_window
+        d = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
+    else:
+        d = df.copy()
+
+    # numeric + drop NaNs
+    d[time_col] = pd.to_numeric(d[time_col], errors="coerce")
+    d[temp_col] = pd.to_numeric(d[temp_col], errors="coerce")
+    d[mass_col] = pd.to_numeric(d[mass_col], errors="coerce")
+    d = d.dropna(subset=[time_col, temp_col, mass_col])
+
+    # ensure strictly increasing time (average duplicates)
+    d = (
+        d.groupby(time_col, as_index=False)[[temp_col, mass_col]]
+        .mean()
+        .sort_values(time_col)
+        .reset_index(drop=True)
+    )
+    if d.shape[0] < 5:
+        raise ValueError("Too few points to compute DTG.")
+
+    t = d[time_col].to_numpy(dtype=float)
+    T = d[temp_col].to_numpy(dtype=float)
+    m = d[mass_col].to_numpy(dtype=float)
+
+    # optional moving-average smoothing
+    if smooth_window and smooth_window >= 3:
+        w = int(smooth_window)
+        if w % 2 == 0:
+            w += 1  # enforce odd
+        kernel = np.ones(w, dtype=float) / float(w)
+        # pad edges to avoid shrinking
+        pad = w // 2
+        m_pad = np.pad(m, (pad, pad), mode="edge")
+        T_pad = np.pad(T, (pad, pad), mode="edge")
+        m = np.convolve(m_pad, kernel, mode="valid")
+        T = np.convolve(T_pad, kernel, mode="valid")
+
+    # derivatives vs time
+    dm_dt = np.gradient(m, t)       # mass% / time
+    dT_dt = np.gradient(T, t)       # °C / time (heating rate)
+
+    # dm/dT via chain rule
+    dm_dT = np.full_like(dm_dt, np.nan, dtype=float)
+    ok = np.isfinite(dm_dt) & np.isfinite(dT_dt) & (np.abs(dT_dt) >= float(beta_min))
+    dm_dT[ok] = dm_dt[ok] / dT_dt[ok]
+
+    # common DTG convention: positive peaks for mass loss
+    dtg_loss = -dm_dT
+
+    out = pd.DataFrame(
+        {
+            time_col: t,
+            temp_col: T,
+            mass_col: m,
+            "dm_dt": dm_dt,
+            "beta_dT_dt": dT_dt,
+            "dm_dT": dm_dT,
+            "dtg_loss": dtg_loss,
+        }
+    )
+
+    if drop_invalid:
+        out = out.dropna(subset=["dm_dT", "dtg_loss"]).reset_index(drop=True)
+
+    return out
+
 
 
 ####

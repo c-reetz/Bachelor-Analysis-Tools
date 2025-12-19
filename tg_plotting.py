@@ -480,3 +480,71 @@ def plot_global_coats_redfern_o2_fit(
         plt.close(fig)
 
 
+def plot_dtg_curve(
+    df: pd.DataFrame,
+    *,
+    time_window: Tuple[float, float] | None = None,
+    x_axis: str = "temp",  # "temp" or "time"
+    time_col: str = "time_min",
+    temp_col: str = "temp_C",
+    mass_col: str = "mass_pct",
+    smooth_window: int = 11,
+    beta_min: float = 1e-6,
+    label: Optional[str] = None,
+    show: bool = False,
+    save_path: Optional[str] = None,
+):
+    """
+    Plot DTG for a TG dataset (math is done in tg_math.compute_dtg_curve).
+
+    Plots:
+      y = dtg_loss = -dm/dT  [mass% / °C]  (positive peaks = mass loss)
+      x = temp_C (default) or time_min
+
+    Returns the DTG dataframe (so you can reuse it / debug).
+    """
+    from tg_math import compute_dtg_curve  # local import to avoid changing top-level imports
+
+    if label is None:
+        label = "DTG"
+
+    dtg = compute_dtg_curve(
+        df,
+        time_window=time_window,
+        time_col=time_col,
+        temp_col=temp_col,
+        mass_col=mass_col,
+        smooth_window=smooth_window,
+        beta_min=beta_min,
+        drop_invalid=True,
+    )
+    if dtg.empty:
+        raise ValueError("DTG dataframe is empty (often happens if dataset is isothermal or beta_min too high).")
+
+    x_axis_l = str(x_axis).lower().strip()
+    if x_axis_l in ("temp", "temperature", "t"):
+        x = dtg[temp_col].to_numpy(dtype=float)
+        xlabel = "Temperature [°C]"
+    elif x_axis_l in ("time", "tmin", "minutes"):
+        x = dtg[time_col].to_numpy(dtype=float)
+        xlabel = "Time [min]"
+    else:
+        raise ValueError("x_axis must be 'temp' or 'time'.")
+
+    y = dtg["dtg_loss"].to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(x, y, "-", label=label)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("DTG = -dm/dT [mass% / °C]")
+    ax.set_title("DTG curve")
+    ax.legend()
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    return dtg

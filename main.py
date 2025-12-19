@@ -77,7 +77,7 @@ res_global_fit_brf = estimate_global_coats_redfern_with_o2(
     o2_fractions=[0.10, 0.20],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
-    alpha_range=(0.20, 0.80),
+    alpha_range=(0.20, 0.50),
     beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
     label="BRF linear heating ramps global O2 fit",
 )
@@ -86,11 +86,11 @@ plot_global_coats_redfern_o2_fit(res_global_fit_brf, save_path="brf_global_cr", 
 
 # global fit WS
 res_global_fit_ws = estimate_global_coats_redfern_with_o2(
-    [ws_5o2_linear, ws_10o2_linear, ws_20o2_linear],
-    o2_fractions=[0.05, 0.10, 0.20],
+    [ws_5o2_linear, ws_10o2_linear],
+    o2_fractions=[0.05, 0.10],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
-    alpha_range=(0.20, 0.80),
+    alpha_range=(0.20, 0.50),
     beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
     label="WS linear heating ramps global O2 fit",
 )
@@ -103,7 +103,7 @@ res_global_fit_pw = estimate_global_coats_redfern_with_o2(
     o2_fractions=[0.05, 0.10, 0.20],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
-    alpha_range=(0.20, 0.80),
+    alpha_range=(0.20, 0.50),
     beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
     label="PW linear heating ramps global O2 fit",
 )
