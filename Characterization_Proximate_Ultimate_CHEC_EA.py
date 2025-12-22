@@ -332,100 +332,170 @@ bet_data = {
 
 df_bet = pd.DataFrame(bet_data)
 
-# Function to display BET results
 def display_bet_results():
-    print("\n" + "="*60)
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    print("\n" + "=" * 60)
     print("BET SURFACE AREA ANALYSIS")
-    print("="*60)
-    
-    # Display table
+    print("=" * 60)
+
+    # -------------------------
+    # Table view
+    # -------------------------
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.axis('off')
-    ax.set_title("BET Specific Surface Area (SSA) of Biochars", fontsize=14, fontweight='bold', pad=20)
-    
-    # Create table
+    ax.axis("off")
+    ax.set_title(
+        "BET Specific Surface Area (SSA) of Biochars",
+        fontsize=14,
+        fontweight="bold",
+        pad=20,
+    )
+
     table_data = []
     for _, row in df_bet.iterrows():
-        table_data.append([row['Sample'], f"{row['BET_SSA (m²/g)']:.3f}"])
-    
-    table = ax.table(cellText=table_data, colLabels=['Sample', 'BET SSA (m²/g)'], 
-                     loc='center', cellLoc='center')
+        table_data.append([row["Sample"], f"{float(row['BET_SSA (m²/g)']):.3f}"])
+
+    table = ax.table(
+        cellText=table_data,
+        colLabels=["Sample", "BET SSA (m²/g)"],
+        loc="center",
+        cellLoc="center",
+    )
     table.auto_set_font_size(False)
     table.set_fontsize(11)
     table.scale(1, 2)
-    
-    # Style header
-    for (row, col), cell in table.get_celld().items():
-        if row == 0:
-            cell.set_text_props(weight='bold')
-            cell.set_facecolor('#e6e6e6')
-    
+
+    for (r, c), cell in table.get_celld().items():
+        if r == 0:
+            cell.set_text_props(weight="bold")
+            cell.set_facecolor("#e6e6e6")
+
     plt.tight_layout()
     plt.show()
-    
-    # Create bar plot
+
+    # -------------------------
+    # Helper: label bars on log axis
+    # -------------------------
+    def _label_bars_log(ax, bars, values, fmt="{:.1f}", mult=1.08):
+        """
+        Add value labels above bars when y-axis is log-scaled.
+        Uses multiplicative offset (height * mult) which behaves well on log scale.
+        """
+        for bar, v in zip(bars, values):
+            if v is None:
+                continue
+            try:
+                vv = float(v)
+            except Exception:
+                continue
+            if not np.isfinite(vv) or vv <= 0:
+                continue
+
+            x = bar.get_x() + bar.get_width() / 2.0
+            y = vv * mult
+            ax.text(x, y, fmt.format(vv), ha="center", va="bottom", fontsize=9)
+
+    # -------------------------
+    # Bar plots (log scale)
+    # -------------------------
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Bar plot 1: All samples
-    samples = df_bet['Sample']
-    ssa_values = df_bet['BET_SSA (m²/g)']
-    
+
+    # ---- Plot 1: All samples (log y) ----
+    samples_all = df_bet["Sample"].astype(str)
+    ssa_all = pd.to_numeric(df_bet["BET_SSA (m²/g)"], errors="coerce")
+
+    # log-scale requires positive values
+    mask_pos = np.isfinite(ssa_all.to_numpy(dtype=float)) & (ssa_all.to_numpy(dtype=float) > 0)
+    samples = samples_all[mask_pos].reset_index(drop=True)
+    ssa_values = ssa_all[mask_pos].reset_index(drop=True)
+
     colors = plt.cm.Set2(np.linspace(0, 1, len(samples)))
-    bars = ax1.bar(samples, ssa_values, color=colors, edgecolor='black')
-    
-    ax1.set_xlabel('Sample', fontsize=12)
-    ax1.set_ylabel('BET SSA (m²/g)', fontsize=12)
-    ax1.set_title('BET Surface Area - All Samples', fontsize=14, fontweight='bold')
-    ax1.tick_params(axis='x', rotation=45)
-    ax1.grid(axis='y', alpha=0.3, linestyle='--')
-    
-    # Add value labels on bars
-    for bar in bars:
-        height = bar.get_height()
-        ax1.text(bar.get_x() + bar.get_width()/2., height + 0.02*max(ssa_values),
-                f'{height:.1f}', ha='center', va='bottom', fontsize=9)
-    
-    # Bar plot 2: Grouped by feedstock
-    feedstocks = ['BRF', 'WS', 'PW']
-    colors_feed = ['#1f77b4', '#ff7f0e', '#2ca02c']
-    
+    bars1 = ax1.bar(samples, ssa_values, color=colors, edgecolor="black")
+
+    ax1.set_xlabel("Sample", fontsize=12)
+    ax1.set_ylabel("BET SSA (m²/g)", fontsize=12)
+    ax1.set_title("BET Surface Area - All Samples (log scale)", fontsize=14, fontweight="bold")
+    ax1.tick_params(axis="x", rotation=45)
+    ax1.grid(axis="y", alpha=0.3, linestyle="--")
+    ax1.set_yscale("log")
+
+    # labels on bars (log-friendly)
+    _label_bars_log(ax1, bars1, ssa_values.to_numpy(dtype=float), fmt="{:.1f}", mult=1.08)
+
+    # ---- Plot 2: Grouped by feedstock & temperature (log y) ----
+    feedstocks = ["BRF", "WS", "PW"]
+    colors_feed = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+    temps = [350, 500, 700]
+
     for i, feedstock in enumerate(feedstocks):
-        feedstock_data = df_bet[df_bet['Sample'].str.contains(feedstock)]
-        temps = [350, 500, 700]
+        feedstock_data = df_bet[df_bet["Sample"].astype(str).str.contains(feedstock, na=False)]
+
         ssa_vals = []
         for temp in temps:
             sample_name = f"{feedstock}_{temp}"
-            if sample_name in feedstock_data['Sample'].values:
-                ssa_vals.append(feedstock_data[feedstock_data['Sample'] == sample_name]['BET_SSA (m²/g)'].values[0])
+            if sample_name in feedstock_data["Sample"].values:
+                val = feedstock_data.loc[
+                    feedstock_data["Sample"] == sample_name, "BET_SSA (m²/g)"
+                ].values[0]
+                val = float(val) if np.isfinite(val) else np.nan
+                # log-scale requires >0
+                if not np.isfinite(val) or val <= 0:
+                    val = np.nan
+                ssa_vals.append(val)
             else:
-                ssa_vals.append(0)
-        
-        x_pos = np.arange(len(temps)) + i*0.25
-        ax2.bar(x_pos, ssa_vals, width=0.25, label=feedstock, 
-                color=colors_feed[i], edgecolor='black')
-    
-    ax2.set_xlabel('Pyrolysis Temperature (°C)', fontsize=12)
-    ax2.set_ylabel('BET SSA (m²/g)', fontsize=12)
-    ax2.set_title('BET Surface Area by Feedstock & Temperature', fontsize=14, fontweight='bold')
+                ssa_vals.append(np.nan)  # missing values cannot be plotted on log axis
+
+        x_pos = np.arange(len(temps)) + i * 0.25
+
+        # Only plot bars where we have finite positive values
+        ssa_arr = np.array(ssa_vals, dtype=float)
+        mask = np.isfinite(ssa_arr) & (ssa_arr > 0)
+
+        bars2 = ax2.bar(
+            x_pos[mask],
+            ssa_arr[mask],
+            width=0.25,
+            label=feedstock,
+            color=colors_feed[i],
+            edgecolor="black",
+        )
+        _label_bars_log(ax2, bars2, ssa_arr[mask], fmt="{:.1f}", mult=1.08)
+
+    ax2.set_xlabel("Pyrolysis Temperature (°C)", fontsize=12)
+    ax2.set_ylabel("BET SSA (m²/g)", fontsize=12)
+    ax2.set_title("BET Surface Area by Feedstock & Temperature (log scale)", fontsize=14, fontweight="bold")
     ax2.set_xticks(np.arange(len(temps)) + 0.25)
     ax2.set_xticklabels(temps)
-    ax2.legend(title='Feedstock')
-    ax2.grid(axis='y', alpha=0.3, linestyle='--')
-    
-    
+    ax2.legend(title="Feedstock")
+    ax2.grid(axis="y", alpha=0.3, linestyle="--")
+    ax2.set_yscale("log")
+
     plt.tight_layout()
     plt.show()
-    
-    # Analysis by feedstock
+
+    # -------------------------
+    # Summary stats
+    # -------------------------
     print("\nBET SSA Analysis by Feedstock:")
     print("-" * 40)
     for feedstock in feedstocks:
-        feedstock_ssa = df_bet[df_bet['Sample'].str.contains(feedstock)]['BET_SSA (m²/g)']
+        feedstock_ssa = pd.to_numeric(
+            df_bet[df_bet["Sample"].astype(str).str.contains(feedstock, na=False)]["BET_SSA (m²/g)"],
+            errors="coerce",
+        ).dropna()
+        feedstock_ssa = feedstock_ssa[feedstock_ssa > 0]
+
         print(f"\n{feedstock}:")
+        if feedstock_ssa.empty:
+            print("  No positive BET SSA values available.")
+            continue
+
         print(f"  Range: {feedstock_ssa.min():.3f} - {feedstock_ssa.max():.3f} m²/g")
         print(f"  Mean: {feedstock_ssa.mean():.3f} m²/g")
-        if feedstock == 'PW':
+        if feedstock == "PW":
             print("  Note: Exceptional increase at higher temperatures")
+
 
 # -----------------------------
 # EXECUTE OUTPUTS (ordered labels)

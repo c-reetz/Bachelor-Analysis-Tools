@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from tg_helpers import print_global_cr_o2_result
 from tg_loader import load_all_thermogravimetric_data, SPEC
 from tg_math import estimate_global_coats_redfern_with_o2
 from tg_plotting import plot_global_coats_redfern_o2_fit
@@ -77,10 +78,14 @@ res_global_fit_brf = estimate_global_coats_redfern_with_o2(
     o2_fractions=[0.10, 0.20],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
-    alpha_range=(0.20, 0.50),
+    conversion_basis="carbon",
+    conversion_range=(0.10, 0.80),
+    feedstock="BRF",
+    #alpha_range=(0.20, 0.50),
     beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
     label="BRF linear heating ramps global O2 fit",
 )
+print_global_cr_o2_result(res_global_fit_brf)
 plot_global_coats_redfern_o2_fit(res_global_fit_brf, save_path="brf_global_cr", title="BRF global CR fit")
 
 
@@ -90,10 +95,14 @@ res_global_fit_ws = estimate_global_coats_redfern_with_o2(
     o2_fractions=[0.05, 0.10],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
-    alpha_range=(0.20, 0.50),
+    #alpha_range=(0.20, 0.50),
     beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
     label="WS linear heating ramps global O2 fit",
+    conversion_basis="carbon",
+    conversion_range=(0.10, 0.80),
+    feedstock="WS",
 )
+print_global_cr_o2_result(res_global_fit_ws)
 plot_global_coats_redfern_o2_fit(res_global_fit_ws, save_path="ws_global_cr", title="WS global CR fit")
 
 
@@ -103,11 +112,19 @@ res_global_fit_pw = estimate_global_coats_redfern_with_o2(
     o2_fractions=[0.05, 0.10, 0.20],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
-    alpha_range=(0.20, 0.50),
+    #alpha_range=(0.20, 0.50),
     beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
     label="PW linear heating ramps global O2 fit",
+    conversion_basis="carbon",
+    conversion_range=(0.10, 0.80),
+    feedstock="PW",
 )
+print_global_cr_o2_result(res_global_fit_pw)
 plot_global_coats_redfern_o2_fit(res_global_fit_pw, save_path="pw_global_cr", title="PW global CR fit")
+
+# Example usage:
+# res = estimate_global_coats_redfern_with_o2(...)
+# print_global_cr_o2_result(res)
 
 
 # BRF

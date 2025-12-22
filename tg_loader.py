@@ -155,8 +155,8 @@ SPEC: Dict[str, Dict[str, Dict[str, str]]] = {
             "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_BRF.xlsx",
         },
         "isothermal_250": {
-            "5%": "",
-            "10%": "",
+            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_BRF500.xlsx",
+            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_BRF500.xlsx",
             "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_BRF 500.xlsx",
         },
         "linear": {
@@ -172,8 +172,8 @@ SPEC: Dict[str, Dict[str, Dict[str, str]]] = {
             "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_WS.xlsx",
         },
         "isothermal_250": {
-            "5%": "",
-            "10%": "",
+            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_WS500.xlsx",
+            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_WS500.xlsx",
             "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_WS500.xlsx",
         },
         "linear": {
@@ -189,8 +189,8 @@ SPEC: Dict[str, Dict[str, Dict[str, str]]] = {
             "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_PW.xlsx",
         },
         "isothermal_250": {
-            "5%": "",
-            "10%": "",
+            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_PW500.xlsx",
+            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_pw500.xlsx",
             "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_PW500.xlsx",
         },
         "linear": {
