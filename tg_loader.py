@@ -160,7 +160,7 @@ SPEC: Dict[str, Dict[str, Dict[str, str]]] = {
             "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_BRF 500.xlsx",
         },
         "linear": {
-            "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_BRF500.xlsx",
+            "5%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_BRF500 5%.xlsx",
             "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_BRF500.xlsx",
             "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_BRF500.xlsx",
         },
@@ -178,8 +178,8 @@ SPEC: Dict[str, Dict[str, Dict[str, str]]] = {
         },
         "linear": {
             "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_WS500.xlsx",
-            "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_WS500.xlsx",
-            "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_ws500.xlsx",
+            "10%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_WS500 10%.xlsx",
+            "20%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_WS500 20% O2.xlsx",
         },
     },
     "PW": {

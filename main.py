@@ -23,8 +23,8 @@ brf_10o2_225C = data["BRF"]["isothermal_225"]["10%"]
 brf_20o2_225c = data["BRF"]["isothermal_225"]["20%"]
 
 # Isothermal, 250C
-brf_5o2_250C = ""
-brf_10o2_250C = ""
+brf_5o2_250C = data["BRF"]["isothermal_250"]["5%"]
+brf_10o2_250C = data["BRF"]["isothermal_250"]["10%"]
 brf_20o2_250C = data["BRF"]["isothermal_250"]["20%"]
 
 #Linear Heating Ramps
@@ -41,8 +41,8 @@ ws_10o2_225C = data["WS"]["isothermal_225"]["10%"]
 ws_20o2_225c = data["WS"]["isothermal_225"]["20%"]
 
 # Isothermal, 250C
-ws_5o2_250C = ""
-ws_10o2_250C = ""
+ws_5o2_250C = data["WS"]["isothermal_250"]["5%"]
+ws_10o2_250C = data["WS"]["isothermal_250"]["10%"]
 ws_20o2_250C = data["WS"]["isothermal_250"]["20%"]
 
 #Linear Heating Ramps
@@ -59,8 +59,8 @@ pw_10o2_225C = data["PW"]["isothermal_225"]["10%"]
 pw_20o2_225c = data["PW"]["isothermal_225"]["20%"]
 
 # Isothermal, 250C
-pw_5o2_250C = ""
-pw_10o2_250C = ""
+pw_5o2_250C = data["PW"]["isothermal_250"]["5%"]
+pw_10o2_250C = data["PW"]["isothermal_250"]["10%"]
 pw_20o2_250C = data["PW"]["isothermal_250"]["20%"]
 
 #Linear Heating Ramps
@@ -74,8 +74,8 @@ pw_20o2_linear = data["PW"]["linear"]["20%"]
 
 # global fit BRF
 res_global_fit_brf = estimate_global_coats_redfern_with_o2(
-    [brf_10o2_linear, brf_20o2_linear],
-    o2_fractions=[0.10, 0.20],
+    [brf_5o2_linear, brf_10o2_linear, brf_20o2_linear],
+    o2_fractions=[0.05, 0.10, 0.20],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
     conversion_basis="carbon",
@@ -91,8 +91,8 @@ plot_global_coats_redfern_o2_fit(res_global_fit_brf, save_path="brf_global_cr", 
 
 # global fit WS
 res_global_fit_ws = estimate_global_coats_redfern_with_o2(
-    [ws_5o2_linear, ws_10o2_linear],
-    o2_fractions=[0.05, 0.10],
+    [ws_5o2_linear, ws_10o2_linear, ws_20o2_linear],
+    o2_fractions=[0.05, 0.10, 0.2],
     time_window=(32.0, 195.0),      # ramp region
     n_solid=1.0,                   # 1st order in solid assumption
     #alpha_range=(0.20, 0.50),
@@ -129,53 +129,6 @@ plot_global_coats_redfern_o2_fit(res_global_fit_pw, save_path="pw_global_cr", ti
 
 # BRF
 """
-seg_bfr_200 = estimate_EA_A_nonisothermal_coats_redfern(bfr200, time_window=(32, 195.5), label="BRF 10%")
-#seg_bfr_225 = estimate_EA_A_nonisothermal_coats_redfern(bfr225, time_window=(88, 290), label="BRF 5%")
-seg_bfr_250 = estimate_EA_A_nonisothermal_coats_redfern(bfr250, time_window=(32, 195), label="BRF 20%")
-
-# WS
-seg_ws_200 = estimate_EA_A_nonisothermal_coats_redfern(ws200, time_window=(32, 195), label="WS 10%")
-seg_ws_225 = estimate_EA_A_nonisothermal_coats_redfern(ws225, time_window=(32, 195), label="WS 5%")
-seg_ws_250 = estimate_EA_A_nonisothermal_coats_redfern(ws250, time_window=(32, 195), label="WS 20%")
-
-# PW
-seg_pw_200 = estimate_EA_A_nonisothermal_coats_redfern(pw200, time_window=(32, 195), label="PW 10%")
-seg_pw_225 = estimate_EA_A_nonisothermal_coats_redfern(pw225, time_window=(32, 195), label="PW 5%")
-seg_pw_250 = estimate_EA_A_nonisothermal_coats_redfern(pw250, time_window=(32, 195), label="PW 20%")
-
-res = estimate_global_coats_redfern_with_o2(
-    [pw225, pw200, pw250],
-    o2_fractions=[0.05, 0.10, 0.20],
-    time_window=(32.0, 195.0),      # ramp region
-    n_solid=1.0,                   # 1st order in solid assumption
-    alpha_range=(0.10, 0.20),
-    beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
-    label="PW ramps global O2 fit",
-)
-
-print("Ea [kJ/mol]:", res.E_A_J_per_mol/1000)
-print("A  [1/min]: ", res.A)
-print("m_O2 order:", res.m_o2)
-print("R²:", res.r2)
-
-plot_global_coats_redfern_o2_fit(res, save_path="pw_global_cr", title="PW global CR fit")
-
-df = pw250
-t0 = 32.0
-t1 = 195.0 # same time window
-seg = df[(df["time_min"] >= t0) & (df["time_min"] <= t1)].copy()
-
-t = seg["time_min"].to_numpy(dtype=float)
-T = seg["temp_C"].to_numpy(dtype=float)
-m_exp = seg["mass_pct"].to_numpy(dtype=float)
-
-# estimate m0 and m_inf in THIS window (same as you do elsewhere)
-N = len(m_exp)
-k_head = max(3, int(round(0.10 * N)))
-k_tail = max(3, int(round(0.20 * N)))
-m0 = float(np.nanmedian(m_exp[:k_head]))
-m_inf = float(np.nanmedian(m_exp[-k_tail:]))
-
 # simulate alpha(t) using your global fitted parameters (res = global fit result)
 alpha_sim = simulate_alpha_ramp(
     time_min=t,
