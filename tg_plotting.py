@@ -548,3 +548,216 @@ def plot_dtg_curve(
     plt.close(fig)
 
     return dtg
+
+def _subset_df_by_segment_or_window(
+    df: pd.DataFrame,
+    *,
+    segment: int | str | None = None,
+    time_window: tuple[float, float] | None = None,
+    time_col: str = "time_min",
+    seg_col: str = "segment",
+) -> pd.DataFrame:
+    """
+    Helper: choose data either by segment (preferred) or by time_window.
+    If segment is given, time_window is ignored.
+    """
+    d = df.copy()
+
+    # Coerce time
+    d[time_col] = pd.to_numeric(d[time_col], errors="coerce")
+
+    if segment is not None:
+        if seg_col not in d.columns:
+            raise KeyError(f"Missing '{seg_col}' column; cannot subset by segment.")
+        # Coerce segment column to numeric to avoid dtype mismatches
+        d[seg_col] = pd.to_numeric(d[seg_col], errors="coerce")
+        seg_val = float(pd.to_numeric(str(segment), errors="coerce"))
+        if not np.isfinite(seg_val):
+            raise ValueError(f"Could not parse segment value: {segment!r}")
+        d = d[d[seg_col] == seg_val].copy()
+    elif time_window is not None:
+        t0, t1 = map(float, time_window)
+        d = d[(d[time_col] >= t0) & (d[time_col] <= t1)].copy()
+
+    # Drop invalid time rows
+    d = d.dropna(subset=[time_col])
+    return d
+
+
+def plot_tg_curve_time(
+    df: pd.DataFrame,
+    *,
+    segment: int | str | None = None,
+    time_window: tuple[float, float] | None = None,
+    time_col: str = "time_min",
+    mass_col: str = "mass_pct",
+    seg_col: str = "segment",
+    # choose m0 and time-zero independently
+    m0_mode: str = "start",      # "start" (shows mass gain >100%) or "max" (caps at 100%)
+    t0_mode: str = "start",      # "start" or "m0"
+    drop_before_t0: bool = False,
+    label: str | None = None,
+    title: str | None = None,
+    show: bool = False,
+    save_path: str | None = None,
+) -> pd.DataFrame:
+    """
+    Plot TG (mass vs time) normalized to m0, with time re-zeroing.
+    Provide either segment=... or time_window=... (segment wins if both).
+    """
+    d = _subset_df_by_segment_or_window(
+        df,
+        segment=segment,
+        time_window=time_window,
+        time_col=time_col,
+        seg_col=seg_col,
+    )
+
+    d[mass_col] = pd.to_numeric(d[mass_col], errors="coerce")
+    d = d.dropna(subset=[time_col, mass_col]).sort_values(time_col)
+
+    if d.empty:
+        raise ValueError("plot_tg_curve_time: no data after segment/window selection and cleaning.")
+
+    t = d[time_col].to_numpy(float)
+    m = d[mass_col].to_numpy(float)
+
+    i_max = int(np.nanargmax(m))
+
+    if m0_mode not in {"start", "max"}:
+        raise ValueError("plot_tg_curve_time: m0_mode must be 'start' or 'max'.")
+    m0 = float(m[0]) if m0_mode == "start" else float(m[i_max])
+    if not np.isfinite(m0) or m0 == 0.0:
+        raise ValueError("plot_tg_curve_time: invalid m0 for normalization.")
+
+    if t0_mode not in {"start", "m0"}:
+        raise ValueError("plot_tg_curve_time: t0_mode must be 'start' or 'm0'.")
+    i_t0 = 0 if t0_mode == "start" else i_max
+
+    if drop_before_t0 and i_t0 > 0:
+        t = t[i_t0:]
+        m = m[i_t0:]
+        t_rel = t - float(t[0])
+    else:
+        t_rel = t - float(t[i_t0])
+
+    mass_norm = 100.0 * (m / m0)
+
+    out = pd.DataFrame(
+        {"time_rel_min": t_rel, "mass_norm_pct": mass_norm, "mass_raw_pct": m}
+    )
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.0))
+    ax.plot(out["time_rel_min"], out["mass_norm_pct"], "-", label=label)
+    ax.set_xlabel("Time (min)")
+    ax.set_ylabel("Mass (% of m0)")
+    ax.set_title(title or "TG curve (mass vs time)")
+    if label:
+        ax.legend()
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    return out
+
+
+def plot_Xc_curve_time(
+    df: pd.DataFrame,
+    *,
+    segment: int | str | None = None,
+    time_window: tuple[float, float] | None = None,
+    time_col: str = "time_min",
+    mass_col: str = "mass_pct",
+    seg_col: str = "segment",
+    feedstock: str | None = None,
+    ash_fraction: float | None = None,
+    as_percent: bool = True,
+    # for Xc you usually want m0 at max and t0 at m0:
+    m0_mode: str = "max",        # "max" or "start"
+    t0_mode: str = "m0",         # "m0" or "start"
+    drop_before_t0: bool = True, # if True, Xc starts at 0
+    clip: bool = False,
+    label: str | None = None,
+    title: str | None = None,
+    show: bool = False,
+    save_path: str | None = None,
+) -> pd.DataFrame:
+    """
+    Plot carbon conversion X_C vs time.
+    Provide either segment=... or time_window=... (segment wins if both).
+    """
+    from tg_math import _resolve_ash_fraction
+
+    d = _subset_df_by_segment_or_window(
+        df,
+        segment=segment,
+        time_window=time_window,
+        time_col=time_col,
+        seg_col=seg_col,
+    )
+
+    d[mass_col] = pd.to_numeric(d[mass_col], errors="coerce")
+    d = d.dropna(subset=[time_col, mass_col]).sort_values(time_col)
+
+    if d.empty:
+        raise ValueError("plot_Xc_curve_time: no data after segment/window selection and cleaning.")
+
+    t = d[time_col].to_numpy(float)
+    m = d[mass_col].to_numpy(float)
+
+    i_max = int(np.nanargmax(m))
+
+    if m0_mode not in {"max", "start"}:
+        raise ValueError("plot_Xc_curve_time: m0_mode must be 'max' or 'start'.")
+    m0 = float(m[i_max]) if m0_mode == "max" else float(m[0])
+    if not np.isfinite(m0) or m0 == 0.0:
+        raise ValueError("plot_Xc_curve_time: invalid m0 for conversion.")
+
+    if t0_mode not in {"start", "m0"}:
+        raise ValueError("plot_Xc_curve_time: t0_mode must be 'start' or 'm0'.")
+    i_t0 = 0 if t0_mode == "start" else i_max
+
+    if drop_before_t0 and i_t0 > 0:
+        t = t[i_t0:]
+        m = m[i_t0:]
+        t_rel = t - float(t[0])
+    else:
+        t_rel = t - float(t[i_t0])
+
+    af = _resolve_ash_fraction(feedstock, ash_fraction)
+    denom = m0 * (1.0 - af)
+    if not np.isfinite(denom) or denom <= 0.0:
+        raise ValueError("plot_Xc_curve_time: invalid denominator (check ash fraction/feedstock).")
+
+    Xc = (m0 - m) / denom
+    if clip:
+        Xc = np.clip(Xc, 0.0, 1.0)
+
+    out = pd.DataFrame(
+        {"time_rel_min": t_rel, "Xc": Xc, "Xc_pct": 100.0 * Xc}
+    )
+
+    y = out["Xc_pct"] if as_percent else out["Xc"]
+    ylabel = "Carbon conversion, $X_C$ (%)" if as_percent else "Carbon conversion, $X_C$ (-)"
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.0))
+    ax.plot(out["time_rel_min"], y, "-", label=label)
+    ax.set_xlabel("Time (min)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title or "Carbon conversion vs time")
+    if label:
+        ax.legend()
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    return out
+

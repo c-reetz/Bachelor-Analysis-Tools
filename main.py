@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from tg_helpers import print_global_cr_o2_result
+from tg_helpers import print_global_cr_o2_result, fit_isothermal_matrix_for_char_loaded
 from tg_loader import load_all_thermogravimetric_data, SPEC
 from tg_math import estimate_global_coats_redfern_with_o2
-from tg_plotting import plot_global_coats_redfern_o2_fit
+from tg_plotting import plot_global_coats_redfern_o2_fit, plot_tg_curve_time
 
 ODIN_PATH = "./TG_Data/Odin Data/"
 SIF_PATH = "./TG_Data/Sif Data/"
@@ -69,7 +69,7 @@ pw_10o2_linear = data["PW"]["linear"]["10%"]
 pw_20o2_linear = data["PW"]["linear"]["20%"]
 
 #####
-# Parse Segments
+# Coats redfern fits
 #####
 
 # global fit BRF
@@ -122,11 +122,52 @@ res_global_fit_pw = estimate_global_coats_redfern_with_o2(
 print_global_cr_o2_result(res_global_fit_pw)
 plot_global_coats_redfern_o2_fit(res_global_fit_pw, save_path="pw_global_cr", title="PW global CR fit")
 
-# Example usage:
-# res = estimate_global_coats_redfern_with_o2(...)
-# print_global_cr_o2_result(res)
+####
+# Isothermal matrix fits
+####
 
+# BRF
+out_brf = fit_isothermal_matrix_for_char_loaded(
+        data["BRF"],
+        char_label="BRF",
+        conversion_basis="carbon",
+        feedstock="BRF",
+        alpha_range=(0.0, 1.0),
+        trim_start_min=0.2,
+        trim_end_min=0.2,
+)
+gf = out_brf["global_fit"]
+print("BRF global:", "Ea[kJ/mol]=", gf.E_A_J_per_mol / 1000, "n=", gf.n_o2, "A=", gf.A, "r2=", gf.r2)
+#print("k_pred(250C, 10% O2) =", gf.predict_k(523.15, 0.10), "1/min")
 
+# WS
+out_ws = fit_isothermal_matrix_for_char_loaded(
+        data["WS"],
+        char_label="WS",
+        conversion_basis="carbon",
+        feedstock="WS",
+        alpha_range=(0.0, 1.0),
+        trim_start_min=0.2,
+        trim_end_min=0.2,
+)
+gfws = out_ws["global_fit"]
+print("WS global:", "Ea[kJ/mol]=", gfws.E_A_J_per_mol / 1000, "n=", gfws.n_o2, "A=", gfws.A, "r2=", gfws.r2)
+
+# PW
+#out_pw = fit_isothermal_matrix_for_char_loaded(
+#        data["PW"],
+#        char_label="PW",
+#        conversion_basis="carbon",
+#        feedstock="PW",
+#        alpha_range=(0.0, 1.0),
+#        trim_start_min=0.2,
+#        trim_end_min=0.2,
+#)
+#gfpw = out_pw["global_fit"]
+#print("PW global:", "Ea[kJ/mol]=", gfpw.E_A_J_per_mol / 1000, "n=", gfpw.n_o2, "A=", gfpw.A, "r2=", gfpw.r2)
+
+plot_tg_curve_time(data["PW"]["isothermal_250"]["5%"], segment=5, m0_mode="start", t0_mode="start", show=True)
+plot_tg_curve_time(data["PW"]["linear"]["5%"], segment=3, m0_mode="start", t0_mode="start", show=True)
 # BRF
 """
 # simulate alpha(t) using your global fitted parameters (res = global fit result)
