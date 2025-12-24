@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tg_helpers import print_global_cr_o2_result
+from tg_helpers import print_global_cr_o2_result, compare_cr_to_char_isothermals
 from tg_loader import load_all_thermogravimetric_data, SPEC
 from tg_math import estimate_global_coats_redfern_with_o2
 from tg_plotting import plot_global_coats_redfern_o2_fit
@@ -125,6 +125,18 @@ plot_global_coats_redfern_o2_fit(res_global_fit_pw, save_path="pw_global_cr", ti
 # Example usage:
 # res = estimate_global_coats_redfern_with_o2(...)
 # print_global_cr_o2_result(res)
+
+tbl_brf = compare_cr_to_char_isothermals(
+    res_global_fit_brf,
+    data["BRF"],
+    char_name="BRF",
+    conversion_basis="carbon",
+    alpha_range=(0.0, 1.0),
+    trim_start_min=0.2,
+    trim_end_min=0.2,
+)
+print(tbl_brf[["T_C","yO2","k_iso_1_per_min","k_CR_pred_1_per_min","CR/ISO_ratio","percent_error_%"]])
+
 
 
 # BRF
