@@ -371,9 +371,7 @@ def extract_isothermal_segments_from_char_data(
     return segments, o2_values, tbl
 
 
-# -------------------------
-# (a) Fit isothermal global law from data["BRF"]
-# -------------------------
+
 def fit_isothermal_global_from_char_data(
     char_data: dict,
     *,
@@ -420,9 +418,7 @@ def fit_isothermal_global_from_char_data(
     return fit, tbl
 
 
-# -------------------------
-# (b) Compare CR vs isothermal-global on same (T, O2)
-# -------------------------
+
 def compare_cr_vs_isothermal_global_on_isothermals(
     cr: GlobalCR_O2_Result,
     iso_fit: GlobalO2ArrheniusFit,
@@ -461,3 +457,184 @@ def compare_cr_vs_isothermal_global_on_isothermals(
     out["CR_vs_ISOglob_diff_%"] = (out["CR/ISOglob_ratio"] - 1.0) * 100.0
 
     return out.sort_values(["T_C", "yO2"]).reset_index(drop=True)
+
+
+def _linear_fit_with_r2(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
+    """
+    Fit y = slope*x + intercept and return (slope, intercept, r2).
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    A = np.vstack([x, np.ones_like(x)]).T
+    slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
+    yhat = slope * x + intercept
+    ss_res = float(np.sum((y - yhat) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    return float(slope), float(intercept), float(r2)
+
+
+def fit_isothermal_matrix_for_char_loaded(
+    char_data: dict,
+    *,
+    char_label: str = "CHAR",
+    temps_C: tuple[int, ...] = (225, 250),
+    o2_labels: tuple[str, ...] = ("5%", "10%", "20%"),
+    conversion_basis: str = "carbon",
+    feedstock: str | None = None,
+    ash_fraction: float | None = None,
+    # conversion filtering inside estimate_segment_rate_first_order:
+    alpha_range: tuple[float, float] = (0.0, 1.0),
+    conversion_range: tuple[float, float] | None = None,
+    # optionally force same conversion window for all 6 runs:
+    enforce_common_conversion: bool = False,
+    common_hi: float | None = None,
+    common_hi_frac: float = 0.90,
+    min_common_hi: float = 0.01,
+    # time-window inference
+    tol_C: float = 2.0,
+    trim_start_min: float = 0.2,
+    trim_end_min: float = 0.2,
+) -> dict:
+    """
+    Fit isothermal matrix (225/250 x 5/10/20% O2) for one char, using already-loaded DataFrames:
+        char_data["isothermal_225"]["5%"] -> df
+
+    Returns dict:
+      {
+        "char": ...,
+        "per_run": <pd.DataFrame>,
+        "per_temp_o2_fit": {225: {...}, 250: {...}},
+        "global_fit": <GlobalO2ArrheniusFit>,
+        "conversion_range_used": (lo,hi) or None
+      }
+    """
+    conv = str(conversion_basis).lower().strip()
+
+    # resolve ash fraction if needed
+    if conv == "carbon" and ash_fraction is None:
+        key = (feedstock or char_label).upper()
+        ash_fraction = ASH_FRACTION_DEFAULTS[key]
+
+    runs = []
+    # tolerate minor regime-key typos: match any key containing "isotherm"
+    for regime_key, o2_map in char_data.items():
+        rk = str(regime_key).lower()
+        if "isotherm" not in rk:
+            continue
+
+        T_C = _parse_temp_from_regime_key(regime_key)
+        if T_C is None or T_C not in temps_C:
+            continue
+        if not isinstance(o2_map, dict):
+            continue
+
+        for o2_lab in o2_labels:
+            df = o2_map.get(o2_lab, None)
+            if df is None:
+                continue
+            if isinstance(df, str):
+                if df.strip() == "":
+                    continue
+                raise TypeError(f"{char_label}/{regime_key}/{o2_lab}: expected DataFrame, got str: {df!r}")
+            if not _valid_df(df):
+                continue
+
+            yO2 = _parse_o2_fraction(o2_lab)
+            tw = infer_isothermal_time_window(
+                df,
+                target_temp_C=float(T_C),
+                tol_C=tol_C,
+                trim_start_min=trim_start_min,
+                trim_end_min=trim_end_min,
+            )
+            runs.append((str(regime_key), int(T_C), float(yO2), str(o2_lab), df, tw))
+
+    if not runs:
+        raise ValueError(f"{char_label}: no isothermal runs found in char_data for temps={temps_C} and o2={o2_labels}")
+
+    # optionally compute an overlap conversion window (carbon-basis)
+    conversion_range_used = conversion_range
+    if enforce_common_conversion and conv == "carbon" and conversion_range_used is None:
+        xmaxs = []
+        for _, _, _, _, df, tw in runs:
+            xmaxs.append(_carbon_Xmax_in_window(df, tw, ash_fraction=float(ash_fraction)))
+        xmaxs = np.asarray(xmaxs, float)
+        xmaxs = xmaxs[np.isfinite(xmaxs)]
+        if xmaxs.size == 0:
+            raise ValueError(f"{char_label}: could not compute Xmax for common conversion window")
+        auto_hi = float(np.min(xmaxs) * common_hi_frac)
+        hi = float(common_hi) if common_hi is not None else max(auto_hi, min_common_hi)
+        conversion_range_used = (0.0, hi)
+
+    segments = []
+    o2_values = []
+    rows = []
+
+    for regime_key, T_C, yO2, o2_lab, df, tw in runs:
+        seg = estimate_segment_rate_first_order(
+            df,
+            time_window=tw,
+            label=f"{char_label}_iso_{T_C}C_{o2_lab}",
+            conversion_basis=conversion_basis,
+            feedstock=feedstock,
+            ash_fraction=ash_fraction,
+            alpha_range=alpha_range,
+            conversion_range=conversion_range_used,
+            normalize_within_window=False,
+        )
+
+        segments.append(seg)
+        o2_values.append(yO2)
+
+        k_iso = float(seg.r_abs)
+        T_K = float(seg.T_mean_K)
+
+        rows.append({
+            "char": char_label,
+            "regime": regime_key,
+            "T_C": float(T_C),
+            "yO2": float(yO2),
+            "T_mean_C": float(T_K - 273.15),
+            "T_mean_K": float(T_K),
+            "k_iso_1_per_min": float(k_iso),
+            "iso_r2": float(seg.r2_mass_vs_time),
+            "iso_n_points": int(seg.n_points),
+            "time_window": tw,
+        })
+
+    per_run = pd.DataFrame(rows).sort_values(["T_C", "yO2"]).reset_index(drop=True)
+
+    # per-temperature oxygen-order fits: ln(k)=b_T + n_T ln(yO2)
+    per_temp_o2_fit = {}
+    for T_C in sorted(set(per_run["T_C"].astype(int).tolist())):
+        sub = per_run[per_run["T_C"].astype(int) == int(T_C)]
+        if sub.shape[0] < 2:
+            per_temp_o2_fit[int(T_C)] = {"n_o2": None, "lnk_at_yO2_1": None, "r2": None, "N": int(sub.shape[0])}
+            continue
+        x = np.log(sub["yO2"].to_numpy(float))
+        y = np.log(sub["k_iso_1_per_min"].to_numpy(float))
+        n_T, b_T, r2_T = _linear_fit_with_r2(x, y)
+        per_temp_o2_fit[int(T_C)] = {"n_o2": n_T, "lnk_at_yO2_1": b_T, "r2": r2_T, "N": int(sub.shape[0])}
+
+    # global Arrhenius+O2 fit
+    global_fit = estimate_global_arrhenius_with_o2_from_segments(
+        segments=segments,
+        o2_values=o2_values,
+        label=f"{char_label} isothermal global fit",
+    )
+
+    return {
+        "char": char_label,
+        "per_run": per_run,
+        "per_temp_o2_fit": per_temp_o2_fit,
+        "global_fit": global_fit,
+        "conversion_range_used": conversion_range_used,
+    }
+
+
+def fit_isothermal_matrix_for_char(*args, **kwargs) -> dict:
+    """
+    Backward-compatible alias (your main.py calls this for BRF).
+    """
+    return fit_isothermal_matrix_for_char_loaded(*args, **kwargs)

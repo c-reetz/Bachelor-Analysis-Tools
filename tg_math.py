@@ -359,9 +359,9 @@ def estimate_segment_rate_first_order(
     mass_col: str = "mass_pct",
     label: Optional[str] = None,
     # conversion handling
-    conversion_basis: str = "alpha",  # "alpha" or "carbon"
-    feedstock: Optional[str] = None,  # for carbon basis: BRF/WS/PW -> uses ASH_FRACTION_DEFAULTS
-    ash_fraction: Optional[float] = None,  # for carbon basis: overrides feedstock default if provided
+    conversion_basis: ConversionBasis = "alpha",  # "alpha" or "carbon"
+    feedstock: Optional[str] = None,              # NEW: allows carbon basis via defaults BRF/WS/PW
+    ash_fraction: Optional[float] = None,         # still allowed (overrides feedstock default)
     conversion_range: Optional[Tuple[float, float]] = None,  # overrides alpha_range if provided
     alpha_range: Tuple[float, float] = (0.10, 0.80),
     # robust reference points inside window
@@ -384,14 +384,12 @@ def estimate_segment_rate_first_order(
     conversion_basis="carbon":
       m0 = max(mass%) inside the time window (always)
       Xc = (m0 − m)/(m0*(1-ash_fraction)), w = 1 − Xc
-      ash_fraction can be passed explicitly, or derived from feedstock="BRF"/"WS"/"PW".
+      ash_fraction can be passed explicitly or derived from feedstock.
 
     Safeguards:
-      - If requested conversion_range is not covered in the window -> raises ValueError
-      - If partially covered -> warns and clips to the overlap
+      - If requested conversion_range is not covered -> raises ValueError
+      - If partially covered -> warns and clips to overlap
     """
-    import warnings
-
     if label is None:
         label = "segment"
 
@@ -412,23 +410,23 @@ def estimate_segment_rate_first_order(
     T_K = sel[temp_col].to_numpy(dtype=float) + 273.15
     m = sel[mass_col].to_numpy(dtype=float)
 
-    # re-zero time inside window
-    t_rel = t - float(t[0])
+    # rebase time to start of window
+    t_rel = t - t[0]
+
     eps = 1e-12
+    n = m.size
+    k_head = max(3, int(round(head_frac * n)))
+    k_tail = max(3, int(round(tail_frac * n)))
 
-    # robust reference points
-    i0 = int(np.clip(round(head_frac * (len(m) - 1)), 0, len(m) - 1))
-    i1 = int(np.clip(round((1.0 - tail_frac) * (len(m) - 1)), 0, len(m) - 1))
-    if i1 <= i0:
-        i0 = 0
-        i1 = max(0, len(m) - 1)
+    # robust start/end masses inside the time window
+    m0_start = float(np.nanmedian(m[:k_head]))
+    m_inf = float(np.nanmedian(m[-k_tail:]))
 
-    m0_start = float(m[i0])
-    m_inf = float(m[i1])
+    conversion_basis_s = str(conversion_basis).lower().strip()
 
-    if conversion_basis == "alpha":
+    # ---- compute X (conversion) and w (remaining fraction) ----
+    if conversion_basis_s == "alpha":
         if normalize_within_window:
-            # old behavior: scale by the span inside the time window
             loss = (m_inf < m0_start)
             if loss:
                 denom = (m0_start - m_inf)
@@ -444,16 +442,15 @@ def estimate_segment_rate_first_order(
             X = np.clip(X, 0.0, 1.0)
             w = np.clip(1.0 - X, 1e-12, 1.0)
         else:
-            # requested behavior: 100% mass at window start, no forced 100% conversion
             if not np.isfinite(m0_start) or abs(m0_start) < eps:
                 raise ValueError("Invalid m0_start in time window.")
             w = m / m0_start
             w = np.clip(w, 1e-12, np.inf)
-            w = np.minimum(w, 1.0)  # cap mass gain -> X=0 there
+            w = np.minimum(w, 1.0)  # cap mass gain -> X=0
             X = np.clip(1.0 - w, 0.0, 1.0)
 
-    elif conversion_basis == "carbon":
-        # Use explicit ash_fraction if provided, else fall back to feedstock defaults (BRF/WS/PW)
+    elif conversion_basis_s == "carbon":
+        # NEW: allow feedstock-based ash defaults
         af = _resolve_ash_fraction(feedstock, ash_fraction)
 
         # IMPORTANT: m0 is highest point inside THIS time window
@@ -470,32 +467,24 @@ def estimate_segment_rate_first_order(
         w = np.clip(1.0 - X, 1e-12, 1.0)
 
     else:
-        raise ValueError(f"Unknown conversion_basis: {conversion_basis}")
+        raise ValueError(f"Unknown conversion_basis: {conversion_basis!r} (use 'alpha' or 'carbon').")
 
-    # choose conversion range for fit
-    if conversion_range is not None:
-        lo_req, hi_req = map(float, conversion_range)
-    else:
-        lo_req, hi_req = map(float, alpha_range)
-
-    if not (0.0 <= lo_req < hi_req <= 1.0):
-        raise ValueError(f"{label}: invalid conversion range [{lo_req},{hi_req}]. Must satisfy 0<=lo<hi<=1.")
+    # ---- apply conversion-range safeguards ----
+    lo_req, hi_req = (conversion_range if conversion_range is not None else alpha_range)
 
     X_min = float(np.nanmin(X))
     X_max = float(np.nanmax(X))
 
-    # determine effective overlap
-    lo_eff = max(lo_req, X_min)
-    hi_eff = min(hi_req, X_max)
+    lo_eff = max(float(lo_req), X_min)
+    hi_eff = min(float(hi_req), X_max)
 
     if hi_eff <= lo_eff:
         raise ValueError(
-            f"{label}: requested conversion range [{lo_req:.2f},{hi_req:.2f}] not covered "
+            f"{label}: requested conversion range [{lo_req:.2f},{hi_req:.2f}] not covered in time_window "
             f"(available [{X_min:.2f},{X_max:.2f}])."
         )
 
-    # warn if only partially covered
-    if (lo_eff > lo_req + 1e-9) or (hi_eff < hi_req - 1e-9):
+    if (lo_eff > float(lo_req) + 1e-12) or (hi_eff < float(hi_req) - 1e-12):
         warnings.warn(
             f"{label}: requested conversion range [{lo_req:.2f},{hi_req:.2f}] only partially covered "
             f"(available [{X_min:.2f},{X_max:.2f}]); using [{lo_eff:.2f},{hi_eff:.2f}] for this fit."
@@ -506,29 +495,28 @@ def estimate_segment_rate_first_order(
         raise ValueError(f"{label}: insufficient points after conversion filtering.")
 
     x = t_rel[mask].astype(float)
-    y = np.log(w[mask].astype(float))  # ln(w) = ln(w0) - k*t
+    y = np.log(w[mask].astype(float))
     T_use = T_K[mask].astype(float)
 
     slope, intercept, r2 = _linear_fit(x, y)
-    k = float(-slope)  # k >= 0 ideally
-
+    k = float(-slope)
     if not np.isfinite(k):
         raise ValueError(f"{label}: could not estimate k (non-finite slope).")
     if k < 0:
-        # keep it non-negative to avoid nonsense downstream
         k = 0.0
 
     return SegmentRate(
         label=str(label),
         T_mean_K=float(np.nanmean(T_use)),
         T_span_K=float(np.nanmax(T_use) - np.nanmin(T_use)),
-        r_abs=float(k),                 # for first-order: r_abs stores k (1/time)
-        slope_signed=float(slope),      # slope of ln(w) vs t (should be ~ -k)
-        intercept=float(intercept),     # ln(w0)
-        r2_mass_vs_time=float(r2),      # name kept for backward compat
+        r_abs=float(k),
+        slope_signed=float(slope),
+        intercept=float(intercept),
+        r2_mass_vs_time=float(r2),
         n_points=int(x.size),
         time_window=(float(t0), float(t1)),
     )
+
 
 
 
