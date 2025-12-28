@@ -1,230 +1,103 @@
+from __future__ import annotations
 from pathlib import Path
+import pandas as pd
+import matplotlib
 
-from tg_helpers import print_global_cr_o2_result, fit_isothermal_matrix_for_char_loaded, compare_cr_to_char_isothermals
+from report_data_helper import run_char, _export_table
+
+matplotlib.use("Agg")
 from tg_loader import load_all_thermogravimetric_data, SPEC
-from tg_math import estimate_global_coats_redfern_with_o2
-from tg_plotting import plot_global_coats_redfern_o2_fit, plot_tg_curve_time, plot_cr_vs_isothermal_k_table
 
-ODIN_PATH = "./TG_Data/Odin Data/"
-SIF_PATH = "./TG_Data/Sif Data/"
+# -------------------------
+# Paths
+# -------------------------
+ODIN_PATH = Path("./TG_Data/Odin Data/")
+SIF_PATH = Path("./TG_Data/Sif Data/")
+BASE_DIR = SIF_PATH  # <- change to ODIN_PATH if needed
 
-#########
-# DATA LOADING todo: find better data loading scheme
-#########
+OUT_ROOT = Path("out")
 
-data = load_all_thermogravimetric_data(Path(SIF_PATH), SPEC)
 
-#######
-# LOAD BRF ISOTHERMAL DATA
-#######
-# Isothermal, 225C
-brf_5o2_225C = data["BRF"]["isothermal_225"]["5%"]
-brf_10o2_225C = data["BRF"]["isothermal_225"]["10%"]
-brf_20o2_225c = data["BRF"]["isothermal_225"]["20%"]
+# -------------------------
+# Global analysis config
+# -------------------------
+RAMP_TIME_WINDOW = (32.0, 195.0)   # min
+BETA_K_PER_MIN = 3.0               # K/min (since your time axis is time_min)
+N_SOLID = 1.0                      # 1st order in solid assumption
 
-# Isothermal, 250C
-brf_5o2_250C = data["BRF"]["isothermal_250"]["5%"]
-brf_10o2_250C = data["BRF"]["isothermal_250"]["10%"]
-brf_20o2_250C = data["BRF"]["isothermal_250"]["20%"]
+# Conversion windows to run for Coats–Redfern (ramp) fits
+CR_WINDOWS = [
+    ("CR_std_0p10_0p80", (0.10, 0.80)),  # "normal" CR results section
+    ("CR_mid_0p05_0p20", (0.05, 0.20)),  # diagnostic
+    ("CR_early_0p00_0p06", (0.00, 0.06)),  # closer to early hold conversion (may be noisy in ramps)
+]
 
-#Linear Heating Ramps
-brf_5o2_linear = data["BRF"]["linear"]["5%"]
-brf_10o2_linear = data["BRF"]["linear"]["10%"]
-brf_20o2_linear = data["BRF"]["linear"]["20%"]
-
-#######
-# LOAD WS DATA
-#######
-# Isothermal, 225C
-ws_5o2_225C = data["WS"]["isothermal_225"]["5%"]
-ws_10o2_225C = data["WS"]["isothermal_225"]["10%"]
-ws_20o2_225c = data["WS"]["isothermal_225"]["20%"]
-
-# Isothermal, 250C
-ws_5o2_250C = data["WS"]["isothermal_250"]["5%"]
-ws_10o2_250C = data["WS"]["isothermal_250"]["10%"]
-ws_20o2_250C = data["WS"]["isothermal_250"]["20%"]
-
-#Linear Heating Ramps
-ws_5o2_linear = data["WS"]["linear"]["5%"]
-ws_10o2_linear = data["WS"]["linear"]["10%"]
-ws_20o2_linear = data["WS"]["linear"]["20%"]
-
-#######
-# LOAD PW DATA
-#######
-# Isothermal, 225C
-pw_5o2_225C = data["PW"]["isothermal_225"]["5%"]
-pw_10o2_225C = data["PW"]["isothermal_225"]["10%"]
-pw_20o2_225c = data["PW"]["isothermal_225"]["20%"]
-
-# Isothermal, 250C
-pw_5o2_250C = data["PW"]["isothermal_250"]["5%"]
-pw_10o2_250C = data["PW"]["isothermal_250"]["10%"]
-pw_20o2_250C = data["PW"]["isothermal_250"]["20%"]
-
-#Linear Heating Ramps
-pw_5o2_linear = data["PW"]["linear"]["5%"]
-pw_10o2_linear = data["PW"]["linear"]["10%"]
-pw_20o2_linear = data["PW"]["linear"]["20%"]
-
-#####
-# Coats redfern fits
-#####
-
-# global fit BRF
-res_global_fit_brf = estimate_global_coats_redfern_with_o2(
-    [brf_5o2_linear, brf_10o2_linear, brf_20o2_linear],
-    o2_fractions=[0.05, 0.10, 0.20],
-    time_window=(32.0, 195.0),      # ramp region
-    n_solid=1.0,                   # 1st order in solid assumption
+# Compare/hold extraction settings (works even if your helper ignores some)
+COMPARE_CFG = dict(
     conversion_basis="carbon",
-    conversion_range=(0.10, 0.80),
-    feedstock="BRF",
-    #alpha_range=(0.20, 0.50),
-    beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
-    label="BRF linear heating ramps global O2 fit",
-)
-print_global_cr_o2_result(res_global_fit_brf)
-plot_global_coats_redfern_o2_fit(res_global_fit_brf, save_path="brf_global_cr", title="BRF global CR fit")
-
-
-# global fit WS
-res_global_fit_ws = estimate_global_coats_redfern_with_o2(
-    [ws_5o2_linear, ws_10o2_linear, ws_20o2_linear],
-    o2_fractions=[0.05, 0.10, 0.2],
-    time_window=(32.0, 195.0),      # ramp region
-    n_solid=1.0,                   # 1st order in solid assumption
-    #alpha_range=(0.20, 0.50),
-    beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
-    label="WS linear heating ramps global O2 fit",
-    conversion_basis="carbon",
-    conversion_range=(0.10, 0.80),
-    feedstock="WS",
-)
-print_global_cr_o2_result(res_global_fit_ws)
-plot_global_coats_redfern_o2_fit(res_global_fit_ws, save_path="ws_global_cr", title="WS global CR fit")
-
-
-# global fit PW
-res_global_fit_pw = estimate_global_coats_redfern_with_o2(
-    [pw_5o2_linear, pw_10o2_linear, pw_20o2_linear],
-    o2_fractions=[0.05, 0.10, 0.20],
-    time_window=(32.0, 195.0),      # ramp region
-    n_solid=1.0,                   # 1st order in solid assumption
-    #alpha_range=(0.20, 0.50),
-    beta_fixed_K_per_time=3.0,     # 3 K/min (since time_min)
-    label="PW linear heating ramps global O2 fit",
-    conversion_basis="carbon",
-    conversion_range=(0.10, 0.80),
-    feedstock="PW",
-)
-print_global_cr_o2_result(res_global_fit_pw)
-plot_global_coats_redfern_o2_fit(res_global_fit_pw, save_path="pw_global_cr", title="PW global CR fit")
-
-tbl_brf = compare_cr_to_char_isothermals(
-    res_global_fit_brf,
-    data["BRF"],
-    char_name="BRF",
-    conversion_basis="carbon",
-    enforce_common_conversion=True,     # recommended
-    common_per_temperature=True,        # recommended
-    start_at_mass_peak=True,            # recommended
+    enforce_common_conversion=True,
+    # If your compare function supports these newer args, they'll be passed automatically:
+    common_per_temperature=True,
+    start_at_mass_peak=True,
+    common_hi_frac=0.90,
+    min_common_hi=0.01,
     trim_start_min=0.2,
     trim_end_min=0.2,
 )
 
-print(tbl_brf[[
-    "T_C", "yO2",
-    "k_iso_1_per_min", "k_CR_pred_1_per_min",
-    "CR/ISO_ratio", "percent_error_%",
-    "iso_r2", "common_hi_used"
-]])
-
-plot_cr_vs_isothermal_k_table(
-    tbl_brf,
-    char_name="BRF",
-    show=True,                      # or False
-    save_prefix="BRF_CR_vs_ISO",     # optional; creates pngs in CWD
-    annotate_points=True,
-    log_scale=True,
-)
+# Controls: turn sections on/off
+DO_CR_FITS = True
+DO_CR_WINDOW_SENSITIVITY = True
+DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS = True
+DO_ISOTHERMAL_GLOBAL_BENCHMARK = True
 
 
-"""
-####
-# Isothermal matrix fits
-####
+# -------------------------
+# Main entrypoint
+# -------------------------
+def main():
+    OUT_ROOT.mkdir(exist_ok=True, parents=True)
 
-# BRF
-out_brf = fit_isothermal_matrix_for_char_loaded(
-        data["BRF"],
-        char_label="BRF",
-        conversion_basis="carbon",
-        feedstock="BRF",
-        alpha_range=(0.0, 1.0),
-        trim_start_min=0.2,
-        trim_end_min=0.2,
-)
-gf = out_brf["global_fit"]
-print("BRF global:", "Ea[kJ/mol]=", gf.E_A_J_per_mol / 1000, "n=", gf.n_o2, "A=", gf.A, "r2=", gf.r2)
-#print("k_pred(250C, 10% O2) =", gf.predict_k(523.15, 0.10), "1/min")
+    # Load all data once
+    data = load_all_thermogravimetric_data(BASE_DIR, SPEC)
 
-# WS
-out_ws = fit_isothermal_matrix_for_char_loaded(
-        data["WS"],
-        char_label="WS",
-        conversion_basis="carbon",
-        feedstock="WS",
-        alpha_range=(0.0, 1.0),
-        trim_start_min=0.2,
-        trim_end_min=0.2,
-)
-gfws = out_ws["global_fit"]
-print("WS global:", "Ea[kJ/mol]=", gfws.E_A_J_per_mol / 1000, "n=", gfws.n_o2, "A=", gfws.A, "r2=", gfws.r2)
+    all_results = {}
+    summary_rows = []
 
-# PW
-#out_pw = fit_isothermal_matrix_for_char_loaded(
-#        data["PW"],
-#        char_label="PW",
-#        conversion_basis="carbon",
-#        feedstock="PW",
-#        alpha_range=(0.0, 1.0),
-#        trim_start_min=0.2,
-#        trim_end_min=0.2,
-#)
-#gfpw = out_pw["global_fit"]
-#print("PW global:", "Ea[kJ/mol]=", gfpw.E_A_J_per_mol / 1000, "n=", gfpw.n_o2, "A=", gfpw.A, "r2=", gfpw.r2)
+    for char in SPEC.keys():
+        if char not in data:
+            continue
 
-#plot_tg_curve_time(data["PW"]["isothermal_250"]["5%"], segment=5, m0_mode="start", t0_mode="start", show=True)
-#plot_tg_curve_time(data["PW"]["linear"]["5%"], segment=3, m0_mode="start", t0_mode="start", show=True)
-# BRF
-"""
+        print(f"\n=== Running {char} ===")
+        res = run_char(char, data[char])
+        all_results[char] = res
 
-"""
-# simulate alpha(t) using your global fitted parameters (res = global fit result)
-alpha_sim = simulate_alpha_ramp(
-    time_min=t,
-    temp_C=T,
-    yO2=0.2,
-    E_A_J_per_mol=res.E_A_J_per_mol,
-    A=res.A,
-    m_o2=res.m_o2,
-    solid_order=1,          # match n_solid you assumed
-    alpha0=0.0,
-)
+        # summary row (standard CR + iso-global if present)
+        cr_std = res["cr_fits"][res["cr_std_name"]]
+        row = {
+            "char": char,
+            "CR_window": res["cr_std_name"],
+            "CR_Ea_kJ_per_mol": cr_std.E_A_J_per_mol / 1000.0,
+            "CR_A_1_per_min": cr_std.A,
+            "CR_m_o2": cr_std.m_o2,
+            "CR_r2": cr_std.r2,
+        }
+        if res["iso_fit"] is not None:
+            iso = res["iso_fit"]
+            row.update({
+                "ISO_Ea_kJ_per_mol": iso.E_A_J_per_mol / 1000.0,
+                "ISO_A_1_per_min": iso.A,
+                "ISO_n_o2": iso.n_o2,
+                "ISO_r2": iso.r2,
+            })
+        summary_rows.append(row)
 
-# convert simulated alpha -> mass%
-m_sim = alpha_to_mass_pct(alpha_sim, m0=m0, m_inf=m_inf, loss=True)
+    if summary_rows:
+        df_summary = pd.DataFrame(summary_rows).sort_values("char").reset_index(drop=True)
+        _export_table(df_summary, OUT_ROOT / "summary_fit_params.csv", OUT_ROOT / "summary_fit_params.tex")
 
-# overlay plot
-plt.figure()
-plt.plot(t, m_exp, "o", label="exp mass%")
-plt.plot(t, m_sim, "-", label="sim mass%")
-plt.xlabel("time [min]")
-plt.ylabel("mass [%]")
-plt.legend()
-plt.tight_layout()
-#plt.savefig("pw_mass_overlay.png", dpi=150)
-plt.close()
-"""
+    print("\nDone. Results written to:", OUT_ROOT.resolve())
+
+
+if __name__ == "__main__":
+    main()
