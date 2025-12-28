@@ -1,63 +1,45 @@
 import math
 import numpy as np
-from pprint import pprint
+from pprint import pprint, pformat
 import re
 import pandas as pd
 from tg_math import estimate_segment_rate_first_order, ASH_FRACTION_DEFAULTS, GlobalO2ArrheniusFit, \
     estimate_global_arrhenius_with_o2_from_segments
 from tg_math import GlobalCR_O2_Result
+from tg_loader import SPEC #debug
 
 
 R_GAS = 8.314462618
 
 
-def print_global_cr_o2_result(res):
+def format_global_cr_o2_result(res) -> str:
     """
-    Pretty-print a tg_math.GlobalCR_O2_Result without dumping huge arrays.
+    Return a formatted summary string for a tg_math.GlobalCR_O2_Result.
+    (Safe for writing to file.)
     """
-
-    # Scalars / metadata
     summary = {
         "label": res.label,
-        "n_solid": res.n_solid,                 # your model order (you set this to 1)
-        "alpha_range_used": res.alpha_range,    # conversion window actually used (may be clipped)
+        "n_solid": res.n_solid,
+        "alpha_range_used": res.alpha_range,
         "time_window_used": res.time_window,
-        "beta_K_per_time": res.beta_K_per_time, # heating rate in K / (time unit)
+        "beta_K_per_time": res.beta_K_per_time,
 
-        # Main fit results
         "E_A_kJ_per_mol": res.E_A_J_per_mol / 1000.0,
         "A": res.A,
-        "lnA": (math.log(res.A) if res.A > 0 else float("nan")),
         "m_o2": res.m_o2,
         "r2": res.r2,
-
-        # Regression internals (useful for debugging / appendix)
-        "intercept": res.intercept,
-        "coef_lnO2": res.coef_lnO2,
-        "coef_invT": res.coef_invT,
-
-        # Point counts
-        "N_pts_total": res.n_points,                 # total points used across all datasets
-        "N_pts_per_dataset": res.dataset_point_counts,
     }
+    return pformat(summary, sort_dicts=False)
 
-    pprint(summary)
 
-    # Array summaries (so you can verify content without printing all values)
-    def _arr_stats(name, a):
-        a = np.asarray(a, dtype=float)
-        if a.size == 0:
-            print(f"{name}: EMPTY")
-            return
-        print(
-            f"{name}: shape={a.shape}, "
-            f"min={np.nanmin(a):.6g}, max={np.nanmax(a):.6g}, "
-            f"finite={np.isfinite(a).sum()}/{a.size}"
-        )
+def print_global_cr_o2_result(res):
+    """
+    Pretty-print AND return a formatted summary string.
+    """
+    txt = format_global_cr_o2_result(res)
+    print(txt)
+    return txt
 
-  #  _arr_stats("x_invT_all (1/T)", res.x_invT_all)
-  #  _arr_stats("z_lnO2_all (ln O2)", res.z_lnO2_all)
-  #  _arr_stats("y_all (ln(g/T^2))", res.y_all)
 
 def _parse_temp_from_regime_key(k: str) -> int | None:
     m = re.search(r"(\d{3})", str(k))
@@ -104,7 +86,6 @@ def _carbon_Xmax_in_window(df: pd.DataFrame, time_window: tuple[float, float], a
     X = np.clip(X, 0.0, 1.0)
     return float(np.nanmax(X))
 
-
 def compare_cr_to_char_isothermals(
     cr: GlobalCR_O2_Result,
     char_data: dict,
@@ -119,30 +100,35 @@ def compare_cr_to_char_isothermals(
     common_hi: float | dict[int, float] | None = None,
     common_hi_frac: float = 0.90,
     min_common_hi: float = 0.01,
-    common_per_temperature: bool = True,   # <-- NEW: per-T overlap windows (recommended)
+    common_per_temperature: bool = True,
     # time-window inference
     tol_C: float = 2.0,
     trim_start_min: float = 0.2,
     trim_end_min: float = 0.2,
-    # window refinement (helps a lot)
-    start_at_mass_peak: bool = True,       # <-- NEW: start window at max(mass) inside hold
-    peak_extra_start_min: float = 0.0,     # e.g. 0.1 min if you want to skip just after peak
-    # fit behavior when NOT enforcing common conversion
+    start_at_mass_peak: bool = True,
+    peak_extra_start_min: float = 0.0,
+    # segment-rate fit options
     alpha_range: tuple[float, float] = (0.0, 1.0),
-):
+    # debug / robustness
+    debug: bool = False,
+    min_points_for_fit: int = 10,
+    skip_on_error: bool = True,
+) -> pd.DataFrame:
     """
-    Uses data["BRF"]-style dict and compares extracted isothermal k to CR-predicted k.
+    Compare CR-predicted k(T,yO2) against extracted isothermal k from each hold.
 
-    Improvements vs old version:
-      - common conversion window computed PER temperature (225 and 250 separately)
-      - optional refinement of inferred isothermal window to start at mass peak
+    debug=True prints:
+      - file path (SPEC)
+      - inferred time window + points inside it
+      - skips/errors per dataset (so you see exactly which file breaks)
+
+    skip_on_error=True prevents the first bad run from killing the whole report.
     """
     conv = str(conversion_basis).lower().strip()
     if conv == "carbon" and ash_fraction is None:
         ash_fraction = ASH_FRACTION_DEFAULTS[str(char_name).upper()]
 
     def _refine_window_to_mass_peak(df: pd.DataFrame, tw: tuple[float, float]) -> tuple[float, float]:
-        """Shift t0 to the time of maximum mass inside tw (plus optional extra)."""
         t0, t1 = tw
         sel = df[(df["time_min"] >= t0) & (df["time_min"] <= t1)].copy()
         if sel.empty:
@@ -159,6 +145,9 @@ def compare_cr_to_char_isothermals(
         if float(t1) <= t0_new:
             return tw
         return (t0_new, float(t1))
+
+    if debug:
+        print(f"\n[CR↔ISO] {char_name} | CR='{getattr(cr, 'label', '')}'")
 
     # ---- collect candidates: (regime_key, T_C, yO2, o2_lab, df, tw) ----
     candidates: list[tuple[str, int, float, str, pd.DataFrame, tuple[float, float]]] = []
@@ -177,49 +166,73 @@ def compare_cr_to_char_isothermals(
 
         for o2_lab in o2_labels:
             df = o2_map.get(o2_lab, None)
-            if df is None:
+            if df is None or not _valid_df(df):
                 continue
-            if isinstance(df, str):
-                if df.strip() == "":
+
+            src = SPEC.get(str(char_name).upper(), {}).get(str(regime_key), {}).get(str(o2_lab), None)
+
+            # infer time window
+            try:
+                # If your infer function supports debug args, use them; otherwise fall back
+                try:
+                    tw = infer_isothermal_time_window(
+                        df,
+                        target_temp_C=float(T_C),
+                        tol_C=tol_C,
+                        trim_start_min=trim_start_min,
+                        trim_end_min=trim_end_min,
+                        debug=bool(debug),
+                        debug_prefix=f"[CR↔ISO] {char_name} {regime_key} {o2_lab} ",
+                    )
+                except TypeError:
+                    tw = infer_isothermal_time_window(
+                        df,
+                        target_temp_C=float(T_C),
+                        tol_C=tol_C,
+                        trim_start_min=trim_start_min,
+                        trim_end_min=trim_end_min,
+                    )
+
+                if start_at_mass_peak:
+                    tw = _refine_window_to_mass_peak(df, tw)
+
+            except Exception as e:
+                msg = f"[CR↔ISO][SKIP] window inference failed | {char_name} | {regime_key} | {o2_lab} | src={src} | err={e}"
+                if debug:
+                    print(msg)
+                if skip_on_error:
                     continue
-                raise TypeError(f"{char_name}/{regime_key}/{o2_lab}: expected DataFrame, got str: {df!r}")
-            if not _valid_df(df):
-                continue
-
-            tw = infer_isothermal_time_window(
-                df,
-                target_temp_C=float(T_C),
-                tol_C=tol_C,
-                trim_start_min=trim_start_min,
-                trim_end_min=trim_end_min,
-            )
-
-            if start_at_mass_peak:
-                tw = _refine_window_to_mass_peak(df, tw)
+                raise
 
             yO2 = _parse_o2_fraction(o2_lab)
+
+            if debug:
+                sel = df[(df["time_min"] >= tw[0]) & (df["time_min"] <= tw[1])]
+                dur = float(tw[1] - tw[0])
+                tmed = float(pd.to_numeric(sel["temp_C"], errors="coerce").median())
+                print(
+                    f"[CR↔ISO] cand | {regime_key} | {T_C}C | {o2_lab} | yO2={yO2:.3f} | "
+                    f"tw={tw} (dur={dur:.2f} min) | sel_n={len(sel)} | src={src} | Tmed={tmed:.2f}"
+                )
+
             candidates.append((str(regime_key), int(T_C), float(yO2), str(o2_lab), df, tw))
 
     if not candidates:
-        return pd.DataFrame()
+        if debug:
+            print(f"[CR↔ISO] No isothermal candidates found for {char_name}. Keys={list(char_data.keys())}")
+        return pd.DataFrame([])
 
-    # ---- compute common_hi_by_T if enforcing common conversion (carbon basis) ----
+    # ---- determine common conversion window(s) if requested ----
     common_hi_by_T: dict[int, float] = {}
 
     if enforce_common_conversion and conv == "carbon":
-        # user supplied dict: {225: 0.025, 250: 0.06}
         if isinstance(common_hi, dict):
             common_hi_by_T = {int(k): float(v) for k, v in common_hi.items()}
-
-        # user supplied scalar: apply to all temps
-        elif common_hi is not None:
+        elif isinstance(common_hi, (int, float)):
             for T_C in temps_C:
                 common_hi_by_T[int(T_C)] = float(common_hi)
-
-        # auto: compute overlap
         else:
             if common_per_temperature:
-                # independent overlap for each temperature
                 for T_C in temps_C:
                     xmaxs = []
                     for _, TT, _, _, df, tw in candidates:
@@ -232,19 +245,17 @@ def compare_cr_to_char_isothermals(
                         continue
                     min_x = float(np.min(xmaxs))
                     auto_hi = float(min_x * common_hi_frac)
-                    # keep within coverage
                     hi = max(auto_hi, min_common_hi)
-                    hi = min(hi, min_x)  # never exceed what is available
+                    hi = min(hi, min_x)
                     common_hi_by_T[int(T_C)] = float(hi)
             else:
-                # one overlap across all 6
                 xmaxs = []
                 for _, _, _, _, df, tw in candidates:
                     xmaxs.append(_carbon_Xmax_in_window(df, tw, ash_fraction=float(ash_fraction)))
                 xmaxs = np.asarray(xmaxs, float)
                 xmaxs = xmaxs[np.isfinite(xmaxs)]
                 if xmaxs.size == 0:
-                    raise ValueError("Could not compute Xmax for common conversion window (check columns/time windows).")
+                    raise ValueError("Could not compute Xmax for common conversion window.")
                 min_x = float(np.min(xmaxs))
                 auto_hi = float(min_x * common_hi_frac)
                 hi = max(auto_hi, min_common_hi)
@@ -252,43 +263,81 @@ def compare_cr_to_char_isothermals(
                 for T_C in temps_C:
                     common_hi_by_T[int(T_C)] = float(hi)
 
+        if debug:
+            print(f"[CR↔ISO] common_hi_by_T({char_name}) = {common_hi_by_T}")
+
         if not common_hi_by_T:
             raise ValueError("enforce_common_conversion=True but could not determine common_hi_by_T.")
 
-    # ---- second pass: fit each run and compare to CR ----
+    # ---- fit each run and compare to CR ----
     rows = []
-    for regime_key, T_C, yO2, o2_lab, df, tw in candidates:
-        if enforce_common_conversion and conv == "carbon":
-            hi = common_hi_by_T.get(int(T_C), None)
-            if hi is None:
-                # if somehow missing, skip this run
-                continue
-            seg = estimate_segment_rate_first_order(
-                df,
-                time_window=tw,
-                label=f"{char_name}_iso_{T_C}C_{o2_lab}",
-                conversion_basis="carbon",
-                ash_fraction=float(ash_fraction),
-                conversion_range=(0.0, float(hi)),
-                normalize_within_window=False,
-            )
-            common_hi_used = float(hi)
-        else:
-            seg = estimate_segment_rate_first_order(
-                df,
-                time_window=tw,
-                label=f"{char_name}_iso_{T_C}C_{o2_lab}",
-                conversion_basis=conversion_basis,
-                ash_fraction=float(ash_fraction) if conv == "carbon" else None,
-                alpha_range=alpha_range,
-                normalize_within_window=False,
-            )
-            common_hi_used = float("nan")
 
-        k_iso = float(seg.r_abs)
+    for regime_key, T_C, yO2, o2_lab, df, tw in candidates:
+        src = SPEC.get(str(char_name).upper(), {}).get(str(regime_key), {}).get(str(o2_lab), None)
+        sel = df[(df["time_min"] >= tw[0]) & (df["time_min"] <= tw[1])]
+        sel_n = int(sel.shape[0])
+
+        if sel_n < int(min_points_for_fit):
+            msg = (
+                f"[CR↔ISO][SKIP] Too few points | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
+                f"tw={tw} | sel_n={sel_n} | src={src}"
+            )
+            if debug:
+                print(msg)
+            if skip_on_error:
+                continue
+            raise ValueError(msg)
+
+        if enforce_common_conversion and conv == "carbon":
+            hi = float(common_hi_by_T[int(T_C)])
+        else:
+            hi = float(alpha_range[1])
+
+        try:
+            if enforce_common_conversion and conv == "carbon":
+                seg = estimate_segment_rate_first_order(
+                    df,
+                    time_window=tw,
+                    label=f"{char_name}_iso_{T_C}C_{o2_lab}",
+                    conversion_basis="carbon",
+                    ash_fraction=float(ash_fraction),
+                    conversion_range=(0.0, float(hi)),
+                    normalize_within_window=False,
+                )
+                common_hi_used = float(hi)
+            else:
+                seg = estimate_segment_rate_first_order(
+                    df,
+                    time_window=tw,
+                    label=f"{char_name}_iso_{T_C}C_{o2_lab}",
+                    conversion_basis=conversion_basis,
+                    ash_fraction=float(ash_fraction) if conv == "carbon" else None,
+                    alpha_range=alpha_range,
+                    normalize_within_window=False,
+                )
+                common_hi_used = float("nan")
+
+        except Exception as e:
+            msg = (
+                f"[CR↔ISO][SKIP] rate fit failed | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
+                f"tw={tw} | sel_n={sel_n} | src={src} | err={e}"
+            )
+            if debug:
+                print(msg)
+            if skip_on_error:
+                continue
+            raise
+
+        k_iso = float(seg.r_abs)               # first-order k (1/min)
         T_mean_K = float(seg.T_mean_K)
-        k_cr = predict_k_from_cr(cr, T_K=T_mean_K, yO2=yO2)
-        ratio = (k_cr / k_iso) if k_iso > 0 else float("nan")
+        k_cr = predict_k_from_cr(cr, T_K=T_mean_K, yO2=float(yO2))
+        ratio = (k_cr / k_iso) if (np.isfinite(k_iso) and k_iso > 0) else float("nan")
+
+        if debug:
+            print(
+                f"[CR↔ISO] fit  | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
+                f"k_iso={k_iso:.3e} | k_CR={k_cr:.3e} | err%={(ratio-1)*100 if np.isfinite(ratio) else float('nan'):.2f} | src={src}"
+            )
 
         rows.append({
             "T_C": float(T_C),
@@ -302,9 +351,17 @@ def compare_cr_to_char_isothermals(
             "time_window": tw,
             "regime": str(regime_key),
             "common_hi_used": common_hi_used,
+            "src": src,
         })
 
-    return pd.DataFrame(rows).sort_values(["T_C", "yO2"]).reset_index(drop=True)
+    out = pd.DataFrame(rows)
+    if debug:
+        print(f"[CR↔ISO] Done {char_name}: kept {len(out)} / {len(candidates)} candidates.\n")
+
+    if out.empty:
+        return out
+
+    return out.sort_values(["T_C", "yO2"]).reset_index(drop=True)
 
 
 
@@ -314,50 +371,122 @@ def infer_isothermal_time_window(
     *,
     tol_C: float = 2.0,
     min_points: int = 30,
+    min_duration_min: float = 5.0,   # refuse tiny windows
     trim_start_min: float = 0.2,
     trim_end_min: float = 0.2,
     time_col: str = "time_min",
     temp_col: str = "temp_C",
+    mass_col: str = "mass_pct",
     seg_col: str = "segment",
 ) -> tuple[float, float]:
     """
-    Pick the segment whose median temperature is closest to target_temp_C.
+    Pick the segment whose median temperature is closest to target_temp_C,
+    but reject segments that are too short or have too few valid points.
+
+    Falls back to a temperature mask if no usable segment exists.
     Returns (t0, t1) trimmed.
     """
+
+    # numeric copies
+    t_all = pd.to_numeric(df.get(time_col, np.nan), errors="coerce").to_numpy(float)
+    T_all = pd.to_numeric(df.get(temp_col, np.nan), errors="coerce").to_numpy(float)
+    m_all = pd.to_numeric(df.get(mass_col, np.nan), errors="coerce").to_numpy(float)
+
+    def _valid_counts(mask: np.ndarray) -> int:
+        return int(np.sum(mask & np.isfinite(t_all) & np.isfinite(T_all) & np.isfinite(m_all)))
+
+    def _duration(mask: np.ndarray) -> float:
+        tt = t_all[mask & np.isfinite(t_all)]
+        if tt.size == 0:
+            return float("nan")
+        return float(np.nanmax(tt) - np.nanmin(tt))
+
+    # ---- Segment-based selection (preferred if segment column exists) ----
     if seg_col in df.columns:
         best_seg = None
         best_score = None
+        best_t0 = None
+        best_t1 = None
+
+        # groupby on original df, but evaluate using numeric arrays by index
         for seg_id, sdf in df.groupby(seg_col, dropna=True):
-            if len(sdf) < min_points:
+            idx = sdf.index.to_numpy()
+
+            # build mask for this segment indices
+            mask_seg = np.zeros(len(df), dtype=bool)
+            # indexes might not be 0..N-1; use position mask safely
+            # easiest: use .iloc positions by converting to positional indices
+            # If df has default RangeIndex, idx == positions; otherwise, map:
+            try:
+                pos = df.index.get_indexer(idx)
+                mask_seg[pos[pos >= 0]] = True
+            except Exception:
+                # fallback: if index mapping fails, skip
                 continue
-            Tmed = float(np.nanmedian(pd.to_numeric(sdf[temp_col], errors="coerce").to_numpy()))
+
+            # require enough valid points for rate fit
+            n_valid = _valid_counts(mask_seg)
+            if n_valid < min_points:
+                continue
+
+            # require enough duration
+            dur = _duration(mask_seg)
+            if not np.isfinite(dur) or dur < min_duration_min:
+                continue
+
+            Tmed = float(np.nanmedian(T_all[mask_seg & np.isfinite(T_all)]))
             if not np.isfinite(Tmed):
                 continue
+
             score = abs(Tmed - target_temp_C)
-            if score <= tol_C and (best_score is None or score < best_score):
+            if score > tol_C:
+                continue
+
+            # candidate time bounds using min/max time (robust)
+            tt = t_all[mask_seg & np.isfinite(t_all)]
+            tmin = float(np.nanmin(tt))
+            tmax = float(np.nanmax(tt))
+
+            t0 = tmin + trim_start_min
+            t1 = tmax - trim_end_min
+            if t1 <= t0:
+                continue
+
+            if best_score is None or score < best_score:
                 best_score = score
                 best_seg = seg_id
+                best_t0, best_t1 = t0, t1
 
         if best_seg is not None:
-            sdf = df[df[seg_col] == best_seg]
-            t0 = float(np.nanmin(pd.to_numeric(sdf[time_col], errors="coerce").to_numpy())) + trim_start_min
-            t1 = float(np.nanmax(pd.to_numeric(sdf[time_col], errors="coerce").to_numpy())) - trim_end_min
-            if t1 <= t0:
-                raise ValueError("Invalid trimmed time window (t1<=t0).")
-            return (t0, t1)
+            return (float(best_t0), float(best_t1))
 
-    # Fallback: temperature mask
-    T = pd.to_numeric(df[temp_col], errors="coerce").to_numpy(float)
-    t = pd.to_numeric(df[time_col], errors="coerce").to_numpy(float)
-    mask = np.isfinite(T) & np.isfinite(t) & (np.abs(T - target_temp_C) <= tol_C)
-    idx = np.where(mask)[0]
-    if idx.size < min_points:
-        raise ValueError(f"Could not infer isothermal region near {target_temp_C}°C.")
-    t0 = float(t[idx[0]]) + trim_start_min
-    t1 = float(t[idx[-1]]) - trim_end_min
+    # ---- Fallback: temperature mask over entire df ----
+    mask = (
+        np.isfinite(t_all) & np.isfinite(T_all) & np.isfinite(m_all)
+        & (np.abs(T_all - target_temp_C) <= tol_C)
+    )
+
+    n_valid = int(np.sum(mask))
+    if n_valid < min_points:
+        raise ValueError(f"Could not infer isothermal region near {target_temp_C}°C (valid points={n_valid}).")
+
+    # IMPORTANT: use min/max time (not first/last index)
+    tmin = float(np.nanmin(t_all[mask]))
+    tmax = float(np.nanmax(t_all[mask]))
+    dur = tmax - tmin
+    if not np.isfinite(dur) or dur < min_duration_min:
+        raise ValueError(
+            f"Inferred region near {target_temp_C}°C is too short (duration={dur:.3g} min). "
+            f"Try increasing tol_C or fixing segment labels."
+        )
+
+    t0 = tmin + trim_start_min
+    t1 = tmax - trim_end_min
     if t1 <= t0:
         raise ValueError("Invalid trimmed time window (t1<=t0).")
+
     return (t0, t1)
+
 
 
 def extract_isothermal_segments_from_char_data(

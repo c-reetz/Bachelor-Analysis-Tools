@@ -3,10 +3,11 @@ from pathlib import Path
 import pandas as pd
 import matplotlib
 
-from report_data_helper import run_char, _export_table
+from report_data_helper import run_char, _export_table, ReportConfig
 
 matplotlib.use("Agg")
 from tg_loader import load_all_thermogravimetric_data, SPEC
+
 
 # -------------------------
 # Paths
@@ -20,23 +21,20 @@ OUT_ROOT = Path("out")
 
 # -------------------------
 # Global analysis config
-# -------------------------
+# --------------------- ----
 RAMP_TIME_WINDOW = (32.0, 195.0)   # min
 BETA_K_PER_MIN = 3.0               # K/min (since your time axis is time_min)
 N_SOLID = 1.0                      # 1st order in solid assumption
 
-# Conversion windows to run for Coats–Redfern (ramp) fits
 CR_WINDOWS = [
-    ("CR_std_0p10_0p80", (0.10, 0.80)),  # "normal" CR results section
-    ("CR_mid_0p05_0p20", (0.05, 0.20)),  # diagnostic
-    ("CR_early_0p00_0p06", (0.00, 0.06)),  # closer to early hold conversion (may be noisy in ramps)
+    ("CR_std_0p10_0p80", (0.10, 0.80)),
+    ("CR_mid_0p05_0p20", (0.05, 0.20)),
+    ("CR_early_0p00_0p06", (0.00, 0.06)),
 ]
 
-# Compare/hold extraction settings (works even if your helper ignores some)
 COMPARE_CFG = dict(
     conversion_basis="carbon",
     enforce_common_conversion=True,
-    # If your compare function supports these newer args, they'll be passed automatically:
     common_per_temperature=True,
     start_at_mass_peak=True,
     common_hi_frac=0.90,
@@ -44,24 +42,38 @@ COMPARE_CFG = dict(
     trim_start_min=0.2,
     trim_end_min=0.2,
 )
+COMPARE_CFG.update({
+    "debug": True,
+    "skip_on_error": True,
+    "min_points_for_fit": 20,  # bump if you want stricter
+})
 
-# Controls: turn sections on/off
+
 DO_CR_FITS = True
 DO_CR_WINDOW_SENSITIVITY = True
 DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS = True
 DO_ISOTHERMAL_GLOBAL_BENCHMARK = True
 
 
-# -------------------------
-# Main entrypoint
-# -------------------------
 def main():
     OUT_ROOT.mkdir(exist_ok=True, parents=True)
 
-    # Load all data once
     data = load_all_thermogravimetric_data(BASE_DIR, SPEC)
 
-    all_results = {}
+    # Bundle report settings to avoid circular imports
+    cfg = ReportConfig(
+        out_root=OUT_ROOT,
+        cr_windows=CR_WINDOWS,
+        ramp_time_window=RAMP_TIME_WINDOW,
+        n_solid=N_SOLID,
+        beta_k_per_min=BETA_K_PER_MIN,
+        compare_cfg=COMPARE_CFG,
+        do_cr_fits=DO_CR_FITS,
+        do_cr_window_sensitivity=DO_CR_WINDOW_SENSITIVITY,
+        do_cr_to_isothermal_tables_and_plots=DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS,
+        do_isothermal_global_benchmark=DO_ISOTHERMAL_GLOBAL_BENCHMARK,
+    )
+
     summary_rows = []
 
     for char in SPEC.keys():
@@ -69,10 +81,8 @@ def main():
             continue
 
         print(f"\n=== Running {char} ===")
-        res = run_char(char, data[char])
-        all_results[char] = res
+        res = run_char(char, data[char], cfg=cfg)
 
-        # summary row (standard CR + iso-global if present)
         cr_std = res["cr_fits"][res["cr_std_name"]]
         row = {
             "char": char,

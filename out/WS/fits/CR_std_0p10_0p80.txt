@@ -1,0 +1,9 @@
+{'label': 'WS ramps global O2 fit (CR_std_0p10_0p80)',
+ 'n_solid': 1.0,
+ 'alpha_range_used': (0.1, 0.8),
+ 'time_window_used': (32.0, 195.0),
+ 'beta_K_per_time': 3.0,
+ 'E_A_kJ_per_mol': 120.53920586659589,
+ 'A': 559953590.8229754,
+ 'm_o2': 0.4924625601034259,
+ 'r2': 0.9951973708130456}

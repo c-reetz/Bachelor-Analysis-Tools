@@ -1,37 +1,71 @@
-# main.py
 from __future__ import annotations
 
 from pathlib import Path
 import json
 import math
 import inspect
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 # Make matplotlib non-interactive (no pop-up windows)
 import matplotlib
-
-from main import OUT_ROOT, CR_WINDOWS, RAMP_TIME_WINDOW, N_SOLID, BETA_K_PER_MIN, DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS, \
-    COMPARE_CFG, DO_ISOTHERMAL_GLOBAL_BENCHMARK, DO_CR_WINDOW_SENSITIVITY, DO_CR_FITS
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from tg_loader import load_all_thermogravimetric_data, SPEC
 from tg_math import estimate_global_coats_redfern_with_o2
 from tg_helpers import (
     print_global_cr_o2_result,
     compare_cr_to_char_isothermals,
     fit_isothermal_global_from_char_data,
-    compare_cr_vs_isothermal_global_on_isothermals,
+    compare_cr_vs_isothermal_global_on_isothermals, format_global_cr_o2_result,
 )
-
 from tg_plotting import plot_global_coats_redfern_o2_fit
 
 
-def _ensure_dirs(char: str) -> dict[str, Path]:
-    base = OUT_ROOT / char
+@dataclass
+class ReportConfig:
+    out_root: Path = Path("out")
+
+    # Coats–Redfern (ramp) conversion windows
+    cr_windows: list[tuple[str, tuple[float, float]]] = field(
+        default_factory=lambda: [
+            ("CR_std_0p10_0p80", (0.10, 0.80)),
+            ("CR_mid_0p05_0p20", (0.05, 0.20)),
+            ("CR_early_0p00_0p06", (0.00, 0.06)),
+        ]
+    )
+
+    # Ramp program metadata
+    ramp_time_window: tuple[float, float] = (32.0, 195.0)  # min
+    n_solid: float = 1.0
+    beta_k_per_min: float = 3.0  # K/min
+
+    # Isothermal extraction / comparison defaults
+    compare_cfg: dict[str, Any] = field(
+        default_factory=lambda: dict(
+            conversion_basis="carbon",
+            enforce_common_conversion=True,
+            common_per_temperature=True,
+            start_at_mass_peak=True,
+            common_hi_frac=0.90,
+            min_common_hi=0.01,
+            trim_start_min=0.2,
+            trim_end_min=0.2,
+        )
+    )
+
+    # Section toggles
+    do_cr_fits: bool = True
+    do_cr_window_sensitivity: bool = True
+    do_cr_to_isothermal_tables_and_plots: bool = True
+    do_isothermal_global_benchmark: bool = True
+
+
+def _ensure_dirs(char: str, out_root: Path) -> dict[str, Path]:
+    base = out_root / char
     d = {
         "base": base,
         "tables": base / "tables",
@@ -67,9 +101,6 @@ def _dump_json(obj: dict, path: Path) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True))
 
 
-# -------------------------
-# Local plotting helper (so main.py works even if tg_plotting isn't updated)
-# -------------------------
 def plot_cr_vs_isothermal_k_table_local(
     tbl: pd.DataFrame,
     *,
@@ -121,8 +152,12 @@ def plot_cr_vs_isothermal_k_table_local(
     if annotate_points:
         for _, r in df_sc.iterrows():
             lab = f"{int(round(float(r['T_C'])))}C, {100*float(r['yO2']):g}%"
-            ax.annotate(lab, (float(r["k_iso_1_per_min"]), float(r["k_CR_pred_1_per_min"])),
-                        textcoords="offset points", xytext=(6, 4))
+            ax.annotate(
+                lab,
+                (float(r["k_iso_1_per_min"]), float(r["k_CR_pred_1_per_min"])),
+                textcoords="offset points",
+                xytext=(6, 4),
+            )
 
     ax.set_xlabel("k_iso extracted [1/min]")
     ax.set_ylabel("k_CR predicted [1/min]")
@@ -159,8 +194,11 @@ def plot_cr_vs_isothermal_k_table_local(
 # -------------------------
 # Pipeline for one char
 # -------------------------
-def run_char(char: str, char_data: dict) -> dict:
-    dirs = _ensure_dirs(char)
+def run_char(char: str, char_data: dict, *, cfg: ReportConfig | None = None) -> dict:
+    if cfg is None:
+        cfg = ReportConfig()
+
+    dirs = _ensure_dirs(char, cfg.out_root)
 
     # ---- collect linear (ramp) datasets available ----
     linear = char_data.get("linear", {})
@@ -183,14 +221,14 @@ def run_char(char: str, char_data: dict) -> dict:
     cr_fits = {}
     cr_rows = []
 
-    if DO_CR_FITS:
-        for win_name, conv_rng in CR_WINDOWS:
+    if cfg.do_cr_fits:
+        for win_name, conv_rng in cfg.cr_windows:
             res = estimate_global_coats_redfern_with_o2(
                 ramp_dfs,
                 o2_fractions=ramp_o2,
-                time_window=RAMP_TIME_WINDOW,
-                n_solid=N_SOLID,
-                beta_fixed_K_per_time=BETA_K_PER_MIN,
+                time_window=cfg.ramp_time_window,
+                n_solid=cfg.n_solid,
+                beta_fixed_K_per_time=cfg.beta_k_per_min,
                 label=f"{char} ramps global O2 fit ({win_name})",
                 conversion_basis="carbon",
                 conversion_range=conv_rng,
@@ -198,7 +236,6 @@ def run_char(char: str, char_data: dict) -> dict:
             )
             cr_fits[win_name] = res
 
-            # params row
             cr_rows.append({
                 "char": char,
                 "window": win_name,
@@ -212,8 +249,7 @@ def run_char(char: str, char_data: dict) -> dict:
                 "runs": ",".join(ramp_labels),
             })
 
-            # save fit details
-            (dirs["fits"] / f"{win_name}.txt").write_text(print_global_cr_o2_result(res) + "\n")
+            (dirs["fits"] / f"{win_name}.txt").write_text(format_global_cr_o2_result(res) + "\n")
             _dump_json(
                 {
                     "char": char,
@@ -223,14 +259,13 @@ def run_char(char: str, char_data: dict) -> dict:
                     "A_1_per_min": res.A,
                     "m_o2": res.m_o2,
                     "r2": res.r2,
-                    "time_window": list(RAMP_TIME_WINDOW),
-                    "beta_K_per_min": BETA_K_PER_MIN,
+                    "time_window": list(cfg.ramp_time_window),
+                    "beta_K_per_min": cfg.beta_k_per_min,
                     "ramp_runs": ramp_labels,
                 },
                 dirs["fits"] / f"{win_name}.json",
             )
 
-            # plot CR fit
             plot_global_coats_redfern_o2_fit(
                 res,
                 save_path=str(dirs["figures"] / f"{win_name}_global_cr"),
@@ -244,20 +279,20 @@ def run_char(char: str, char_data: dict) -> dict:
 
     # choose "standard" CR fit as the main one for prediction/benchmark
     std_name = "CR_std_0p10_0p80"
-    if std_name not in cr_fits:
-        # fallback to first available
+    if std_name not in cr_fits and cr_fits:
         std_name = next(iter(cr_fits.keys()))
+    if not cr_fits:
+        raise RuntimeError(f"{char}: no CR fits available (cfg.do_cr_fits is False?).")
     cr_std = cr_fits[std_name]
 
     # ---- compare CR predictions to isothermal extracted k ----
     tbl_cr_vs_iso = pd.DataFrame()
-    if DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS:
-        kw = _filter_kwargs(compare_cr_to_char_isothermals, dict(char_name=char, **COMPARE_CFG))
+    if cfg.do_cr_to_isothermal_tables_and_plots:
+        kw = _filter_kwargs(compare_cr_to_char_isothermals, dict(char_name=char, **cfg.compare_cfg))
         tbl_cr_vs_iso = compare_cr_to_char_isothermals(cr_std, char_data, **kw)
 
         _export_table(tbl_cr_vs_iso, dirs["tables"] / "cr_vs_isothermal.csv", dirs["tables"] / "cr_vs_isothermal.tex")
 
-        # plot (local helper)
         plot_cr_vs_isothermal_k_table_local(
             tbl_cr_vs_iso,
             title=f"{char}: CR({std_name}) predicted vs isothermal extracted",
@@ -268,10 +303,10 @@ def run_char(char: str, char_data: dict) -> dict:
 
     # ---- window sensitivity summary (optional) ----
     df_win_sens = pd.DataFrame()
-    if DO_CR_WINDOW_SENSITIVITY and DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS and not tbl_cr_vs_iso.empty:
+    if cfg.do_cr_window_sensitivity and cfg.do_cr_to_isothermal_tables_and_plots and not tbl_cr_vs_iso.empty:
         sens_rows = []
         for win_name, res in cr_fits.items():
-            kw = _filter_kwargs(compare_cr_to_char_isothermals, dict(char_name=char, **COMPARE_CFG))
+            kw = _filter_kwargs(compare_cr_to_char_isothermals, dict(char_name=char, **cfg.compare_cfg))
             tbl = compare_cr_to_char_isothermals(res, char_data, **kw)
             if tbl.empty or "percent_error_%" not in tbl.columns:
                 continue
@@ -297,18 +332,17 @@ def run_char(char: str, char_data: dict) -> dict:
     tbl_iso_extracted = pd.DataFrame()
     tbl_cr_vs_isoGlobal = pd.DataFrame()
 
-    if DO_ISOTHERMAL_GLOBAL_BENCHMARK:
+    if cfg.do_isothermal_global_benchmark:
         iso_fit, tbl_iso_extracted = fit_isothermal_global_from_char_data(
             char_data,
             char_name=char,
             conversion_basis="carbon",
             alpha_range=(0.0, 1.0),
-            trim_start_min=COMPARE_CFG.get("trim_start_min", 0.2),
-            trim_end_min=COMPARE_CFG.get("trim_end_min", 0.2),
+            trim_start_min=float(cfg.compare_cfg.get("trim_start_min", 0.2)),
+            trim_end_min=float(cfg.compare_cfg.get("trim_end_min", 0.2)),
         )
         _export_table(tbl_iso_extracted, dirs["tables"] / "isothermal_extracted_k.csv", dirs["tables"] / "isothermal_extracted_k.tex")
 
-        # save iso-fit params
         _dump_json(
             {
                 "char": char,
