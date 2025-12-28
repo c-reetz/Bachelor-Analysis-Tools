@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 import json
 import math
@@ -340,6 +341,8 @@ def run_char(char: str, char_data: dict, *, cfg: ReportConfig | None = None) -> 
             alpha_range=(0.0, 1.0),
             trim_start_min=float(cfg.compare_cfg.get("trim_start_min", 0.2)),
             trim_end_min=float(cfg.compare_cfg.get("trim_end_min", 0.2)),
+            debug=True,
+            skip_on_error=True
         )
         _export_table(tbl_iso_extracted, dirs["tables"] / "isothermal_extracted_k.csv", dirs["tables"] / "isothermal_extracted_k.tex")
 
@@ -354,8 +357,37 @@ def run_char(char: str, char_data: dict, *, cfg: ReportConfig | None = None) -> 
             dirs["fits"] / "iso_global_fit.json",
         )
 
-        tbl_cr_vs_isoGlobal = compare_cr_vs_isothermal_global_on_isothermals(cr_std, iso_fit, tbl_iso_extracted)
-        _export_table(tbl_cr_vs_isoGlobal, dirs["tables"] / "cr_vs_isothermal_global.csv", dirs["tables"] / "cr_vs_isothermal_global.tex")
+        if iso_fit is not None:
+            _dump_json(
+                {
+                    "char": char,
+                    "Ea_kJ_per_mol": iso_fit.E_A_J_per_mol / 1000.0,
+                    "A_1_per_min": iso_fit.A,
+                    "n_o2": iso_fit.n_o2,
+                    "r2": iso_fit.r2,
+                },
+                dirs["fits"] / "iso_global_fit.json",
+            )
+            tbl_cr_vs_isoGlobal = compare_cr_vs_isothermal_global_on_isothermals(cr_std, iso_fit, tbl_iso_extracted)
+            _export_table(tbl_cr_vs_isoGlobal, dirs["tables"] / "cr_vs_isothermal_global.csv", dirs["tables"] / "cr_vs_isothermal_global.tex")
+        else:
+            print(f"[ISO-GLOBAL] {char}: iso_fit=None (not enough valid segments).")
+            tbl_cr_vs_isoGlobal = pd.DataFrame()
+
+    df_hold = build_hold_usability_table(
+        char_name=char,
+        tbl_cr_vs_iso=tbl_cr_vs_iso,
+        raw_char_data=char_data,
+        delta_alpha_min=0.01,  # your “nothing happened” threshold
+    )
+    outp = dirs["tables"] / "optionB_isothermal_summary.tex"
+    print("[OptionB] writing:", outp.resolve())
+    write_optionB_tex(
+        df_hold=df_hold,
+        out_tex_path=dirs["tables"] / "optionB_isothermal_summary.tex",
+        example_figure_relpath=f"{char}/figures/<PUT_YOUR_EXAMPLE_FIGURE_NAME_HERE>.png",
+    )
+    print("[OptionB] exists:", outp.exists(), "size:", outp.stat().st_size if outp.exists() else None)
 
     return {
         "char": char,
@@ -367,4 +399,394 @@ def run_char(char: str, char_data: dict, *, cfg: ReportConfig | None = None) -> 
         "iso_fit": iso_fit,
         "tbl_iso_extracted": tbl_iso_extracted,
         "tbl_cr_vs_isoGlobal": tbl_cr_vs_isoGlobal,
+    }
+
+
+def _parse_feedstock_and_charT(char_name: str) -> tuple[str, int | None]:
+    """
+    Best-effort parse, e.g. 'BRF500' -> ('BRF', 500), 'PW_650' -> ('PW', 650).
+    If it can't parse T, returns (CHAR_NAME, None).
+    """
+    s = str(char_name).strip()
+    m = re.match(r"^\s*([A-Za-z]+)[\s_\-]*([0-9]{3,4})\s*$", s)
+    if not m:
+        return (s, None)
+    return (m.group(1).upper(), int(m.group(2)))
+
+def _parse_holdT_from_regime(regime: str) -> int | None:
+    m = re.search(r"(\d{3})", str(regime))
+    return int(m.group(1)) if m else None
+
+def _safe_float(x) -> float:
+    try:
+        v = float(x)
+        return v
+    except Exception:
+        return float("nan")
+
+def build_hold_usability_table(
+    *,
+    char_name: str,
+    tbl_cr_vs_iso: pd.DataFrame,
+    raw_char_data: dict,
+    delta_alpha_min: float = 0.01,
+) -> pd.DataFrame:
+    """
+    Creates the compact table you described:
+    Feedstock | Char T | Hold T | O2(%) | Δα in hold | Fit window | k | R² | Note
+
+    Uses tbl_cr_vs_iso for k, R² and time_window, and raw_char_data to compute Δα
+    (from mass change in the hold window).
+    """
+    feedstock, charT = _parse_feedstock_and_charT(char_name)
+
+    rows = []
+    for _, r in tbl_cr_vs_iso.iterrows():
+        regime = r.get("regime", None)
+        o2_lab = r.get("o2_lab", None)
+        T_C = r.get("T_C", None)
+        yO2 = r.get("yO2", None)
+        k_iso = r.get("k_iso_1_per_min", None)
+        r2 = r.get("iso_r2", None)
+        tw = r.get("time_window", None)  # expected (t0, t1) as tuple/list
+
+        holdT = _parse_holdT_from_regime(regime) or (int(T_C) if pd.notna(T_C) else None)
+
+        # --- compute Δα in hold from raw mass data (robust median-of-ends) ---
+        # raw_char_data structure is assumed like raw_char_data[regime][o2_lab] -> df
+        delta_alpha = float("nan")
+        try:
+            df = raw_char_data.get(str(regime), {}).get(str(o2_lab), None)
+            if isinstance(df, pd.DataFrame) and tw is not None and len(tw) == 2:
+                t0, t1 = float(tw[0]), float(tw[1])
+                sel = df[(df["time_min"] >= t0) & (df["time_min"] <= t1)].copy()
+                if len(sel) >= 4:
+                    m0 = pd.to_numeric(sel["mass_pct"], errors="coerce").iloc[:5].median()
+                    m1 = pd.to_numeric(sel["mass_pct"], errors="coerce").iloc[-5:].median()
+                    if np.isfinite(m0) and np.isfinite(m1) and m0 > 0:
+                        # “fractional mass loss during hold” as a practical Δα proxy
+                        delta_alpha = max(0.0, (m0 - m1) / m0)
+        except Exception:
+            pass
+
+        # --- note / usability logic ---
+        used = np.isfinite(delta_alpha) and (delta_alpha >= float(delta_alpha_min))
+        note = "Used" if used else "No measurable oxidation"
+
+        # --- formatting fields (keep numeric in df; format later for LaTeX) ---
+        o2_pct = float(yO2) * 100.0 if pd.notna(yO2) else (
+            float(str(o2_lab).replace("%", "")) if o2_lab is not None and "%" in str(o2_lab) else float("nan")
+        )
+
+        rows.append({
+            "Feedstock": feedstock,
+            "Char T (°C)": charT if charT is not None else "",
+            "Hold T (°C)": holdT if holdT is not None else "",
+            "O2 (%)": o2_pct if np.isfinite(o2_pct) else "",
+            "Δα in hold": delta_alpha if np.isfinite(delta_alpha) else np.nan,
+            "Fit window (min)": (tw if (tw is not None and len(tw) == 2) else None),
+            "k (min$^{-1}$)": _safe_float(k_iso) if used else np.nan,
+            "R$^2$": _safe_float(r2) if used else np.nan,
+            "Note": note,
+            "regime": regime,
+            "o2_lab": o2_lab,
+        })
+
+    out = pd.DataFrame(rows)
+
+    # Convert Fit window to a nice "t0--t1" string (or em dash)
+    def _tw_str(x):
+        if not isinstance(x, (list, tuple)) or len(x) != 2:
+            return r"\textemdash"
+        return f"{float(x[0]):.0f}--{float(x[1]):.0f}"
+
+    out["Fit window (min)"] = out["Fit window (min)"].apply(_tw_str)
+
+    return out[[
+        "Feedstock", "Char T (°C)", "Hold T (°C)", "O2 (%)",
+        "Δα in hold", "Fit window (min)", "k (min$^{-1}$)", "R$^2$", "Note"
+    ]].sort_values(["Feedstock", "Char T (°C)", "Hold T (°C)", "O2 (%)"], kind="stable")
+
+def write_optionB_tex(
+    *,
+    df_hold: pd.DataFrame,
+    out_tex_path: Path,
+    example_figure_relpath: str | None = None,
+    caption: str = "Isothermal hold usability and extracted rate constants.",
+    label: str = "tab:iso-usability",
+    fig_caption: str = "Example first-order fit on an isothermal hold.",
+    fig_label: str = "fig:iso-example-fit",
+) -> None:
+    """
+    Writes ONE .tex file containing the table + (optional) one example figure.
+    Requires LaTeX packages: booktabs, siunitx, float, graphicx.
+    """
+    df = df_hold.copy()
+
+    # LaTeX-friendly formatting (uses siunitx \num{} for scientific notation)
+    def fmt_num(x, nd=2):
+        if x is None or (isinstance(x, float) and not np.isfinite(x)):
+            return r"\textemdash"
+        return f"{float(x):.{nd}f}"
+
+    def fmt_sci(x):
+        if x is None or (isinstance(x, float) and not np.isfinite(x)):
+            return r"\textemdash"
+        return r"\num{" + f"{float(x):.2e}" + "}"
+
+    df["O2 (%)"] = df["O2 (%)"].apply(lambda v: fmt_num(v, nd=0) if str(v) != "" else r"\textemdash")
+    df["Δα in hold"] = df["Δα in hold"].apply(lambda v: fmt_num(v, nd=2))
+    df["k (min$^{-1}$)"] = df["k (min$^{-1}$)"].apply(fmt_sci)
+    df["R$^2$"] = df["R$^2$"].apply(lambda v: fmt_num(v, nd=2))
+
+    tabular = df.to_latex(
+        index=False,
+        escape=False,
+        na_rep=r"\textemdash",
+        column_format="llrrrrrll",
+        longtable=False,
+        caption=None,
+        label=None,
+    )
+
+    parts = []
+    parts.append(r"\begin{table}[H]")
+    parts.append(r"\centering")
+    parts.append(r"\small")
+    parts.append(r"\caption{" + caption + r"}")
+    parts.append(r"\label{" + label + r"}")
+    parts.append(r"\sisetup{detect-all=true}")
+    parts.append(tabular)
+    parts.append(r"\end{table}")
+    parts.append("")
+
+    if example_figure_relpath:
+        parts.append(r"\begin{figure}[H]")
+        parts.append(r"\centering")
+        parts.append(r"\includegraphics[width=0.90\linewidth]{" + example_figure_relpath + r"}")
+        parts.append(r"\caption{" + fig_caption + r"}")
+        parts.append(r"\label{" + fig_label + r"}")
+        parts.append(r"\end{figure}")
+        parts.append("")
+
+    out_tex_path.write_text("\n".join(parts), encoding="utf-8")
+
+def _find_isothermal_regime_key(char_data: dict, hold_temp_C: int) -> str | None:
+    target = f"isothermal_{int(hold_temp_C)}"
+    if target in char_data:
+        return target
+    # fallback: any key containing both 'isothermal' and the temperature number
+    cands = [k for k in char_data.keys()
+             if isinstance(k, str) and ("isothermal" in k.lower()) and (str(int(hold_temp_C)) in k)]
+    return cands[0] if cands else None
+
+
+def _norm_mass_curve(df: pd.DataFrame, *, trim_start_min: float = 0.0, trim_end_min: float = 0.0):
+    """
+    Returns time_rel (min) and m_norm = m/m0 for an isothermal segment DF with columns:
+    'time_min' and 'mass_pct'.
+    """
+    if df is None or df.empty:
+        return None, None
+
+    d = df.copy()
+    d["time_min"] = pd.to_numeric(d["time_min"], errors="coerce")
+    d["mass_pct"] = pd.to_numeric(d["mass_pct"], errors="coerce")
+    d = d.dropna(subset=["time_min", "mass_pct"])
+    if d.empty:
+        return None, None
+
+    tmin = float(d["time_min"].min())
+    tmax = float(d["time_min"].max())
+    lo = tmin + float(trim_start_min)
+    hi = tmax - float(trim_end_min)
+    if hi <= lo:
+        lo, hi = tmin, tmax
+
+    d = d[(d["time_min"] >= lo) & (d["time_min"] <= hi)].copy()
+    if len(d) < 3:
+        return None, None
+
+    d = d.sort_values("time_min")
+    t = d["time_min"].to_numpy(float)
+    m = d["mass_pct"].to_numpy(float)
+
+    # robust m0: median of first few points
+    m0 = float(np.median(m[: min(5, len(m))]))
+    if not np.isfinite(m0) or m0 == 0:
+        return None, None
+
+    t_rel = t - t[0]
+    m_norm = m / m0
+    return t_rel, m_norm
+
+
+def plot_isothermal_matrix_feedstock_o2(
+    data: dict,
+    *,
+    hold_temp_C: int = 225,
+    charT: int | None = 500,
+    feedstocks: list[str] = ("BRF", "WS", "PW"),
+    o2_order: list[str] = ("5%", "10%", "20%"),
+    out_dir: Path,
+    filename_stem: str | None = None,
+    trim_start_min: float = 0.0,
+    trim_end_min: float = 0.0,
+    save_tex_snippet: bool = True,
+) -> dict:
+    """
+    Builds a grid:
+      rows = feedstocks
+      cols = O2 levels
+
+    Each cell: m/m0 vs time for isothermal hold at hold_temp_C.
+    Saves PNG+PDF (and optional .tex snippet) into out_dir.
+
+    Returns a dict with paths.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # pick one char per feedstock (matching charT if provided)
+    chosen = {}
+    keys = list(data.keys())
+
+    for fs in feedstocks:
+        fsU = fs.upper()
+        cands = []
+        for k in keys:
+            feed, ct = _parse_feedstock_and_charT(k)
+            if feed == fsU and (charT is None or ct == int(charT)):
+                cands.append(k)
+        chosen[fsU] = cands[0] if cands else None
+
+    # figure naming
+    if filename_stem is None:
+        if charT is None:
+            filename_stem = f"iso_matrix_{int(hold_temp_C)}C"
+        else:
+            filename_stem = f"iso_matrix_{int(hold_temp_C)}C_charT{int(charT)}"
+
+    png_path = out_dir / f"{filename_stem}.png"
+    pdf_path = out_dir / f"{filename_stem}.pdf"
+    tex_path = out_dir / f"{filename_stem}.tex"
+
+    nrows = len(feedstocks)
+    ncols = len(o2_order)
+
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(3.6*ncols, 2.6*nrows), sharex=True, sharey=True)
+    if nrows == 1 and ncols == 1:
+        axes = np.array([[axes]])
+    elif nrows == 1:
+        axes = np.array([axes])
+    elif ncols == 1:
+        axes = np.array([[ax] for ax in axes])
+
+    # gather global limits for consistent axes
+    all_tmax = []
+    all_ymin = []
+
+    curves = {}  # (i,j) -> (t, y) or None
+    for i, fs in enumerate(feedstocks):
+        fsU = fs.upper()
+        char_key = chosen.get(fsU)
+        for j, o2 in enumerate(o2_order):
+            ax = axes[i, j]
+            if not char_key:
+                curves[(i, j)] = None
+                continue
+
+            char_data = data.get(char_key, {})
+            reg = _find_isothermal_regime_key(char_data, int(hold_temp_C))
+            if not reg:
+                curves[(i, j)] = None
+                continue
+
+            df = char_data.get(reg, {}).get(o2, None)
+            if not _is_df(df):
+                curves[(i, j)] = None
+                continue
+
+            t_rel, m_norm = _norm_mass_curve(df, trim_start_min=trim_start_min, trim_end_min=trim_end_min)
+            if t_rel is None:
+                curves[(i, j)] = None
+                continue
+
+            curves[(i, j)] = (t_rel, m_norm)
+            all_tmax.append(float(np.nanmax(t_rel)))
+            all_ymin.append(float(np.nanmin(m_norm)))
+
+    x_max = max(all_tmax) if all_tmax else 1.0
+    y_min = min(all_ymin) if all_ymin else 0.95
+    y_min = min(y_min, 0.999)  # ensure room
+
+    # plot
+    for i, fs in enumerate(feedstocks):
+        fsU = fs.upper()
+        char_key = chosen.get(fsU)
+
+        for j, o2 in enumerate(o2_order):
+            ax = axes[i, j]
+            item = curves.get((i, j), None)
+
+            if item is None:
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax.transAxes)
+                ax.set_xlim(0, x_max)
+                ax.set_ylim(y_min, 1.01)
+            else:
+                t_rel, m_norm = item
+                ax.plot(t_rel, m_norm)
+
+                # small annotation: Δm/m0 (%)
+                dm_pct = 100.0 * (1.0 - float(m_norm[-1]))
+                ax.text(0.02, 0.95, f"$\\Delta m/m_0$={dm_pct:.1f}\\%",
+                        transform=ax.transAxes, ha="left", va="top", fontsize=9)
+
+                ax.set_xlim(0, x_max)
+                ax.set_ylim(y_min, 1.01)
+
+            # column titles
+            if i == 0:
+                ax.set_title(f"O$_2$ = {o2}")
+
+            # row labels (feedstock + char key)
+            if j == 0:
+                if char_key:
+                    ax.set_ylabel(f"{fsU}\n({char_key})")
+                else:
+                    ax.set_ylabel(f"{fsU}\n(no char)")
+
+            # x-labels on bottom row only
+            if i == nrows - 1:
+                ax.set_xlabel("Time in hold (min)")
+
+    fig.suptitle(f"Isothermal hold at {int(hold_temp_C)} $^\\circ$C: normalized mass $m/m_0$ vs time", y=1.02)
+    fig.tight_layout()
+
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    plt.close(fig)
+
+    if save_tex_snippet:
+        # Use relative path if you \input from OUT_ROOT; adjust as you prefer
+        cap = (f"Normalized mass $m/m_0$ vs time during isothermal holds at {int(hold_temp_C)} "
+               f"$^\\circ$C for multiple feedstocks and oxygen levels. Each panel shows $m/m_0$ "
+               f"with time shifted to the start of the hold.")
+        lab = f"fig:iso-matrix-{int(hold_temp_C)}C" + (f"-charT{int(charT)}" if charT is not None else "")
+        tex = "\n".join([
+            r"\begin{figure}[H]",
+            r"\centering",
+            rf"\includegraphics[width=0.98\linewidth]{{{png_path.as_posix()}}}",
+            rf"\caption{{{cap}}}",
+            rf"\label{{{lab}}}",
+            r"\end{figure}",
+            ""
+        ])
+        tex_path.write_text(tex, encoding="utf-8")
+
+    return {
+        "png": png_path,
+        "pdf": pdf_path,
+        "tex": tex_path if save_tex_snippet else None,
+        "chosen_chars": chosen,
     }

@@ -501,23 +501,33 @@ def extract_isothermal_segments_from_char_data(
     tol_C: float = 2.0,
     trim_start_min: float = 0.2,
     trim_end_min: float = 0.2,
+    # NEW
+    start_at_mass_peak: bool = True,
+    peak_extra_start_min: float = 0.0,
+    min_points_for_fit: int = 10,
+    min_duration_min: float = 3.0,
+    skip_on_error: bool = True,
+    debug: bool = False,
 ) -> tuple[list, list[float], pd.DataFrame]:
     """
     Collect isothermal SegmentRate objects + O2 values from data["BRF"]-style dict.
     Returns: (segments, o2_values, table_of_extracted_k)
+
+    Robust behavior:
+      - Any dataset that fails window inference or segment fitting is SKIPPED (if skip_on_error=True)
+      - A row is still emitted to tbl with status='SKIP' and err message
     """
-    conv = str(conversion_basis).lower().strip()
-    if conv == "carbon" and ash_fraction is None:
+    if conversion_basis.lower().strip() == "carbon" and ash_fraction is None:
         ash_fraction = ASH_FRACTION_DEFAULTS[str(char_name).upper()]
 
-    segments = []
+    segments: list = []
     o2_values: list[float] = []
     rows = []
 
     for regime_key, o2_map in char_data.items():
         rk = str(regime_key).lower()
 
-        # be tolerant: "isothermal_225", "isotherm_225", even typos like "isotherml_250"
+        # Only isothermals here (avoid ramp files entirely)
         if "isotherm" not in rk:
             continue
 
@@ -533,53 +543,140 @@ def extract_isothermal_segments_from_char_data(
             if df is None:
                 continue
             if isinstance(df, str):
-                # skip placeholders like "" (your main currently sets some to "")
                 if df.strip() == "":
                     continue
-                # if it is a non-empty string, it's likely a bug in wiring
                 raise TypeError(f"{char_name}/{regime_key}/{o2_lab}: expected DataFrame, got str: {df!r}")
-
             if not _valid_df(df):
                 continue
 
+            src = SPEC.get(str(char_name).upper(), {}).get(str(regime_key), {}).get(str(o2_lab), None)
             yO2 = _parse_o2_fraction(o2_lab)
-            tw = infer_isothermal_time_window(
-                df,
-                target_temp_C=float(T_C),
-                tol_C=tol_C,
-                trim_start_min=trim_start_min,
-                trim_end_min=trim_end_min,
-            )
-            tw = refine_window_to_mass_peak(df, tw, extra_start_min=0.0)
 
-            seg = estimate_segment_rate_first_order(
-                df,
-                time_window=tw,
-                label=f"{char_name}_iso_{T_C}C_{o2_lab}",
-                conversion_basis=conversion_basis,
-                ash_fraction=ash_fraction,   # used only if carbon basis
-                alpha_range=alpha_range,
-                normalize_within_window=False,
-            )
+            # -------- infer time window --------
+            try:
+                tw = infer_isothermal_time_window(
+                    df,
+                    target_temp_C=float(T_C),
+                    tol_C=tol_C,
+                    trim_start_min=trim_start_min,
+                    trim_end_min=trim_end_min,
+                )
+            except Exception as e:
+                msg = f"window_inference_failed: {e}"
+                if debug:
+                    print(f"[ISO-EXTRACT][SKIP] {char_name} | {regime_key} | {o2_lab} | src={src} | {msg}")
+                rows.append({
+                    "char": char_name,
+                    "regime": str(regime_key),
+                    "T_C": float(T_C),
+                    "yO2": float(yO2),
+                    "o2_label": str(o2_lab),
+                    "src": src,
+                    "time_window": None,
+                    "status": "SKIP",
+                    "err": msg,
+                })
+                if skip_on_error:
+                    continue
+                raise
 
+            # -------- optional refine start at mass peak (SAFE) --------
+            tw_before = tw
+            if start_at_mass_peak:
+                try:
+                    tw = refine_window_to_mass_peak(df, tw, extra_start_min=float(peak_extra_start_min))
+                except Exception:
+                    tw = tw_before
+
+                # If refinement collapses the window, ignore it
+                sel = df[(df["time_min"] >= tw[0]) & (df["time_min"] <= tw[1])]
+                dur = float(tw[1] - tw[0])
+                if sel.shape[0] < min_points_for_fit or dur < min_duration_min:
+                    if debug:
+                        print(
+                            f"[ISO-EXTRACT][PEAKREF-IGNORE] {char_name} | {regime_key} | {o2_lab} | "
+                            f"tw_refined={tw} (n={sel.shape[0]}, dur={dur:.2f} min) -> using tw={tw_before} | src={src}"
+                        )
+                    tw = tw_before
+
+            # -------- fit segment rate --------
+            sel = df[(df["time_min"] >= tw[0]) & (df["time_min"] <= tw[1])]
+            if debug:
+                tmed = float(pd.to_numeric(sel["temp_C"], errors="coerce").median())
+                print(
+                    f"[ISO-EXTRACT] {char_name} | {regime_key} | {o2_lab} | T={T_C}C | yO2={yO2:.3f} | "
+                    f"tw={tw} (dur={tw[1]-tw[0]:.2f} min) | sel_n={sel.shape[0]} | Tmed={tmed:.2f} | src={src}"
+                )
+
+            if sel.shape[0] < min_points_for_fit:
+                msg = f"too_few_points: {sel.shape[0]} in tw={tw}"
+                if debug:
+                    print(f"[ISO-EXTRACT][SKIP] {char_name} | {regime_key} | {o2_lab} | src={src} | {msg}")
+                rows.append({
+                    "char": char_name,
+                    "regime": str(regime_key),
+                    "T_C": float(T_C),
+                    "yO2": float(yO2),
+                    "o2_label": str(o2_lab),
+                    "src": src,
+                    "time_window": tw,
+                    "status": "SKIP",
+                    "err": msg,
+                })
+                if skip_on_error:
+                    continue
+                raise ValueError(msg)
+
+            try:
+                seg = estimate_segment_rate_first_order(
+                    df,
+                    time_window=tw,
+                    label=f"{char_name}_iso_{T_C}C_{o2_lab}",
+                    conversion_basis=conversion_basis,
+                    ash_fraction=ash_fraction,
+                    alpha_range=alpha_range,
+                    normalize_within_window=False,
+                )
+            except Exception as e:
+                msg = f"segment_fit_failed: {e}"
+                if debug:
+                    print(f"[ISO-EXTRACT][SKIP] {char_name} | {regime_key} | {o2_lab} | src={src} | {msg}")
+                rows.append({
+                    "char": char_name,
+                    "regime": str(regime_key),
+                    "T_C": float(T_C),
+                    "yO2": float(yO2),
+                    "o2_label": str(o2_lab),
+                    "src": src,
+                    "time_window": tw,
+                    "status": "SKIP",
+                    "err": msg,
+                })
+                if skip_on_error:
+                    continue
+                raise
+
+            # OK
             segments.append(seg)
             o2_values.append(float(yO2))
-
             rows.append({
                 "char": char_name,
                 "regime": str(regime_key),
                 "T_C": float(T_C),
                 "yO2": float(yO2),
+                "o2_label": str(o2_lab),
+                "src": src,
                 "time_window": tw,
-                "T_mean_C": float(seg.T_mean_K - 273.15),
-                "T_mean_K": float(seg.T_mean_K),
+                "status": "OK",
                 "k_iso_1_per_min": float(seg.r_abs),
-                "iso_r2": float(seg.r2_mass_vs_time),
-                "iso_n_points": int(seg.n_points),
+                "iso_r2": float(getattr(seg, "r2_mass_vs_time", float("nan"))),
+                "n_points": int(getattr(seg, "n_points", sel.shape[0])),
+                "T_mean_K": float(getattr(seg, "T_mean_K", (T_C + 273.15))),
             })
 
-    tbl = pd.DataFrame(rows).sort_values(["T_C", "yO2"]).reset_index(drop=True)
+    tbl = pd.DataFrame(rows)
     return segments, o2_values, tbl
+
 
 
 
@@ -597,6 +694,8 @@ def fit_isothermal_global_from_char_data(
     trim_end_min: float = 0.2,
     o2_basis: str = "fraction",
     n_o2_fixed: float | None = None,
+    debug: bool = False,
+    skip_on_error: bool = True,
 ) -> tuple[GlobalO2ArrheniusFit, pd.DataFrame]:
     """
     Returns (iso_global_fit, tbl_iso_extracted) where:
@@ -614,10 +713,46 @@ def fit_isothermal_global_from_char_data(
         tol_C=tol_C,
         trim_start_min=trim_start_min,
         trim_end_min=trim_end_min,
+        debug=debug,
+        skip_on_error=skip_on_error,
     )
 
-    if len(segments) < 3:
-        raise ValueError(f"{char_name}: need >=3 isothermal segments to fit global law (got {len(segments)}).")
+    # --- Filter out unusable segments (k must be finite and > 0) ---
+    good_idx = []
+    bad_rows = []
+
+    for i, seg in enumerate(segments):
+        k = float(getattr(seg, "r_abs", float("nan")))
+        if np.isfinite(k) and k > 0.0:
+            good_idx.append(i)
+        else:
+            bad_rows.append((i, k))
+
+    if bad_rows and debug:
+        for i, k in bad_rows:
+            print(f"[ISO-GLOBAL][DROP] {char_name}: segment #{i} has invalid k={k} (must be >0)")
+
+    segments = [segments[i] for i in good_idx]
+    o2_values = [o2_values[i] for i in good_idx]
+
+    # Also mark dropped segments in the table (if present)
+    if isinstance(tbl, pd.DataFrame) and not tbl.empty and "status" in tbl.columns:
+        # mark any OK rows with nonpositive k as DROP
+        if "k_iso_1_per_min" in tbl.columns:
+            mask_drop = (tbl["status"] == "OK") & (~np.isfinite(tbl["k_iso_1_per_min"]) | (tbl["k_iso_1_per_min"] <= 0))
+            tbl.loc[mask_drop, "status"] = "DROP"
+            tbl.loc[mask_drop, "err"] = "k<=0 or non-finite; excluded from global Arrhenius fit"
+
+    if len(segments) < 2:
+        msg = f"{char_name}: Not enough valid isothermal segments for global fit after filtering (n={len(segments)})."
+        if debug:
+            print("[ISO-GLOBAL][STOP]", msg)
+        if skip_on_error:
+            return None, tbl
+        raise ValueError(msg)
+
+  #  if len(segments) < 3:
+  #      raise ValueError(f"{char_name}: need >=3 isothermal segments to fit global law (got {len(segments)}).")
 
     fit = estimate_global_arrhenius_with_o2_from_segments(
         segments=segments,

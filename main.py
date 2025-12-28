@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import matplotlib
 
-from report_data_helper import run_char, _export_table, ReportConfig
+from report_data_helper import run_char, _export_table, ReportConfig, plot_isothermal_matrix_feedstock_o2
 
 matplotlib.use("Agg")
 from tg_loader import load_all_thermogravimetric_data, SPEC
@@ -107,6 +107,20 @@ def main():
         _export_table(df_summary, OUT_ROOT / "summary_fit_params.csv", OUT_ROOT / "summary_fit_params.tex")
 
     print("\nDone. Results written to:", OUT_ROOT.resolve())
+
+    matrix_out = plot_isothermal_matrix_feedstock_o2(
+        data,
+        hold_temp_C=225,
+        charT=500,  # set None if you want "best available per feedstock"
+        feedstocks=["BRF", "WS", "PW"],
+        o2_order=["5%", "10%", "20%"],
+        out_dir=OUT_ROOT / "figures",
+        trim_start_min=0.2,
+        trim_end_min=0.2,
+        save_tex_snippet=True,
+    )
+    print("[Matrix] saved:", matrix_out["png"])
+    print("[Matrix] chosen chars:", matrix_out["chosen_chars"])
 
 
 if __name__ == "__main__":

@@ -3,6 +3,13 @@
   <component name="CsvFileAttributes">
     <option name="attributeMap">
       <map>
+        <entry key="/out/BRF/tables/cr_vs_isothermal_global.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/BRF/tables/cr_window_sensitivity.csv">
           <value>
             <Attribute>
@@ -11,6 +18,20 @@
           </value>
         </entry>
         <entry key="/out/BRF/tables/isothermal_extracted_k.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/WS/tables/cr_vs_isothermal_global.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/WS/tables/isothermal_extracted_k.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />
