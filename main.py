@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from tg_helpers import print_global_cr_o2_result, fit_isothermal_matrix_for_char_loaded
+from tg_helpers import print_global_cr_o2_result, fit_isothermal_matrix_for_char_loaded, compare_cr_to_char_isothermals
 from tg_loader import load_all_thermogravimetric_data, SPEC
 from tg_math import estimate_global_coats_redfern_with_o2
-from tg_plotting import plot_global_coats_redfern_o2_fit, plot_tg_curve_time
+from tg_plotting import plot_global_coats_redfern_o2_fit, plot_tg_curve_time, plot_cr_vs_isothermal_k_table
 
 ODIN_PATH = "./TG_Data/Odin Data/"
 SIF_PATH = "./TG_Data/Sif Data/"
@@ -71,7 +71,7 @@ pw_20o2_linear = data["PW"]["linear"]["20%"]
 #####
 # Coats redfern fits
 #####
-"""
+
 # global fit BRF
 res_global_fit_brf = estimate_global_coats_redfern_with_o2(
     [brf_5o2_linear, brf_10o2_linear, brf_20o2_linear],
@@ -122,6 +122,36 @@ res_global_fit_pw = estimate_global_coats_redfern_with_o2(
 print_global_cr_o2_result(res_global_fit_pw)
 plot_global_coats_redfern_o2_fit(res_global_fit_pw, save_path="pw_global_cr", title="PW global CR fit")
 
+tbl_brf = compare_cr_to_char_isothermals(
+    res_global_fit_brf,
+    data["BRF"],
+    char_name="BRF",
+    conversion_basis="carbon",
+    enforce_common_conversion=True,     # recommended
+    common_per_temperature=True,        # recommended
+    start_at_mass_peak=True,            # recommended
+    trim_start_min=0.2,
+    trim_end_min=0.2,
+)
+
+print(tbl_brf[[
+    "T_C", "yO2",
+    "k_iso_1_per_min", "k_CR_pred_1_per_min",
+    "CR/ISO_ratio", "percent_error_%",
+    "iso_r2", "common_hi_used"
+]])
+
+plot_cr_vs_isothermal_k_table(
+    tbl_brf,
+    char_name="BRF",
+    show=True,                      # or False
+    save_prefix="BRF_CR_vs_ISO",     # optional; creates pngs in CWD
+    annotate_points=True,
+    log_scale=True,
+)
+
+
+"""
 ####
 # Isothermal matrix fits
 ####

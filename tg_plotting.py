@@ -761,3 +761,133 @@ def plot_Xc_curve_time(
 
     return out
 
+
+def plot_cr_vs_isothermal_k_table(
+    tbl: pd.DataFrame,
+    *,
+    char_name: str | None = None,
+    k_iso_col: str = "k_iso_1_per_min",
+    k_cr_col: str = "k_CR_pred_1_per_min",
+    t_col: str = "T_C",
+    o2_col: str = "yO2",
+    make_scatter: bool = True,
+    make_overlay_vs_o2: bool = True,
+    log_scale: bool = True,
+    annotate_points: bool = True,
+    show: bool = False,
+    save_prefix: str | None = None,
+) -> None:
+    """
+    Plots comparisons from the output table of compare_cr_to_char_isothermals().
+
+    Generates (optionally):
+      1) scatter: k_CR_pred vs k_iso with 1:1 line
+      2) overlay: k_iso and k_CR_pred vs O2 for each temperature
+
+    Parameters
+    ----------
+    tbl : pd.DataFrame
+        Must contain columns:
+          - T_C, yO2
+          - k_iso_1_per_min
+          - k_CR_pred_1_per_min
+    save_prefix : str | None
+        If provided, saves figures as:
+          f"{save_prefix}_scatter.png"
+          f"{save_prefix}_vsO2.png"
+    """
+    if tbl is None or tbl.empty:
+        raise ValueError("Input table is empty.")
+    for c in (k_iso_col, k_cr_col, t_col, o2_col):
+        if c not in tbl.columns:
+            raise ValueError(f"Missing required column: {c}")
+
+    df = tbl.copy()
+    df = df[np.isfinite(df[k_iso_col].to_numpy(float)) & np.isfinite(df[k_cr_col].to_numpy(float))]
+    if df.empty:
+        raise ValueError("No finite k values to plot.")
+
+    title_prefix = f"{char_name}: " if char_name else ""
+
+    # -------------------- (1) scatter: predicted vs observed --------------------
+    if make_scatter:
+        fig, ax = plt.subplots(figsize=(6.5, 5.5))
+
+        x = df[k_iso_col].to_numpy(float)
+        y = df[k_cr_col].to_numpy(float)
+
+        if log_scale:
+            # filter positive only
+            mask = (x > 0) & (y > 0)
+            x = x[mask]
+            y = y[mask]
+            df_sc = df.loc[df.index[mask]]
+            ax.set_xscale("log")
+            ax.set_yscale("log")
+        else:
+            df_sc = df
+
+        ax.plot(x, y, "o")
+
+        # 1:1 line
+        if x.size and y.size:
+            lo = float(np.nanmin([np.nanmin(x), np.nanmin(y)]))
+            hi = float(np.nanmax([np.nanmax(x), np.nanmax(y)]))
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo > 0:
+                ax.plot([lo, hi], [lo, hi], "-")
+
+        if annotate_points:
+            for _, r in df_sc.iterrows():
+                lab = f"{int(round(float(r[t_col])))}C, {100*float(r[o2_col]):g}%"
+                ax.annotate(
+                    lab,
+                    (float(r[k_iso_col]), float(r[k_cr_col])),
+                    textcoords="offset points",
+                    xytext=(6, 4),
+                )
+
+        ax.set_xlabel("k_iso [1/min]")
+        ax.set_ylabel("k_CR_pred [1/min]")
+        ax.set_title(f"{title_prefix}CR vs isothermal k (predicted vs extracted)")
+        fig.tight_layout()
+
+        if save_prefix:
+            fig.savefig(f"{save_prefix}_scatter.png", dpi=150, bbox_inches="tight")
+        if show:
+            plt.show()
+        plt.close(fig)
+
+    # -------------------- (2) overlay: k vs O2 at each temperature --------------------
+    if make_overlay_vs_o2:
+        # one figure per temperature (avoids clutter, keeps interpretation clean)
+        for Tval in sorted(df[t_col].unique()):
+            sub = df[df[t_col] == Tval].sort_values(o2_col)
+            if sub.empty:
+                continue
+
+            fig, ax = plt.subplots(figsize=(6.5, 5.0))
+
+            o2 = sub[o2_col].to_numpy(float) * 100.0
+            k_iso = sub[k_iso_col].to_numpy(float)
+            k_cr = sub[k_cr_col].to_numpy(float)
+
+            ax.plot(o2, k_iso, "o-", label="isothermal extracted")
+            ax.plot(o2, k_cr, "o-", label="CR predicted")
+
+            if log_scale:
+                # x is O2% (linear), y often benefits from log
+                masky = (k_iso > 0) & (k_cr > 0)
+                if np.any(masky):
+                    ax.set_yscale("log")
+
+            ax.set_xlabel("O$_2$ [%]")
+            ax.set_ylabel("k [1/min]")
+            ax.set_title(f"{title_prefix}{int(round(float(Tval)))}°C: k vs O$_2$")
+            ax.legend()
+            fig.tight_layout()
+
+            if save_prefix:
+                fig.savefig(f"{save_prefix}_vsO2_{int(round(float(Tval)))}C.png", dpi=150, bbox_inches="tight")
+            if show:
+                plt.show()
+            plt.close(fig)

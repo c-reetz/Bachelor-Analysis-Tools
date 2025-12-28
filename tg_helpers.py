@@ -114,40 +114,75 @@ def compare_cr_to_char_isothermals(
     o2_labels: tuple[str, ...] = ("5%", "10%", "20%"),
     conversion_basis: str = "carbon",
     ash_fraction: float | None = None,
-    # --- NEW: common conversion window controls ---
+    # common conversion window controls
     enforce_common_conversion: bool = True,
-    common_hi: float | None = None,        # if None, auto = min(Xmax)*common_hi_frac
+    common_hi: float | dict[int, float] | None = None,
     common_hi_frac: float = 0.90,
-    min_common_hi: float = 0.01,           # don't go below this unless you force common_hi
-    # fit behavior
-    alpha_range: tuple[float, float] = (0.0, 1.0),  # only used if enforce_common_conversion=False
+    min_common_hi: float = 0.01,
+    common_per_temperature: bool = True,   # <-- NEW: per-T overlap windows (recommended)
+    # time-window inference
     tol_C: float = 2.0,
     trim_start_min: float = 0.2,
     trim_end_min: float = 0.2,
+    # window refinement (helps a lot)
+    start_at_mass_peak: bool = True,       # <-- NEW: start window at max(mass) inside hold
+    peak_extra_start_min: float = 0.0,     # e.g. 0.1 min if you want to skip just after peak
+    # fit behavior when NOT enforcing common conversion
+    alpha_range: tuple[float, float] = (0.0, 1.0),
 ):
     """
-    Uses data["BRF"] and compares extracted isothermal k to CR-predicted k.
-    If enforce_common_conversion=True, fits ALL runs on the same carbon-conversion window [0, common_hi].
-    """
+    Uses data["BRF"]-style dict and compares extracted isothermal k to CR-predicted k.
 
+    Improvements vs old version:
+      - common conversion window computed PER temperature (225 and 250 separately)
+      - optional refinement of inferred isothermal window to start at mass peak
+    """
     conv = str(conversion_basis).lower().strip()
     if conv == "carbon" and ash_fraction is None:
         ash_fraction = ASH_FRACTION_DEFAULTS[str(char_name).upper()]
 
-    # ---- collect candidate (df, T_C, yO2, time_window, label) ----
-    candidates = []
+    def _refine_window_to_mass_peak(df: pd.DataFrame, tw: tuple[float, float]) -> tuple[float, float]:
+        """Shift t0 to the time of maximum mass inside tw (plus optional extra)."""
+        t0, t1 = tw
+        sel = df[(df["time_min"] >= t0) & (df["time_min"] <= t1)].copy()
+        if sel.empty:
+            return tw
+        t = pd.to_numeric(sel["time_min"], errors="coerce").to_numpy(float)
+        m = pd.to_numeric(sel["mass_pct"], errors="coerce").to_numpy(float)
+        mask = np.isfinite(t) & np.isfinite(m)
+        t = t[mask]
+        m = m[mask]
+        if t.size < 5:
+            return tw
+        t_peak = float(t[int(np.nanargmax(m))])
+        t0_new = max(float(t0), t_peak + float(peak_extra_start_min))
+        if float(t1) <= t0_new:
+            return tw
+        return (t0_new, float(t1))
+
+    # ---- collect candidates: (regime_key, T_C, yO2, o2_lab, df, tw) ----
+    candidates: list[tuple[str, int, float, str, pd.DataFrame, tuple[float, float]]] = []
+
     for regime_key, o2_map in char_data.items():
         rk = str(regime_key).lower()
         if "isotherm" not in rk:
             continue
+
         T_C = _parse_temp_from_regime_key(regime_key)
         if T_C is None or T_C not in temps_C:
             continue
+
         if not isinstance(o2_map, dict):
             continue
 
         for o2_lab in o2_labels:
             df = o2_map.get(o2_lab, None)
+            if df is None:
+                continue
+            if isinstance(df, str):
+                if df.strip() == "":
+                    continue
+                raise TypeError(f"{char_name}/{regime_key}/{o2_lab}: expected DataFrame, got str: {df!r}")
             if not _valid_df(df):
                 continue
 
@@ -159,41 +194,85 @@ def compare_cr_to_char_isothermals(
                 trim_end_min=trim_end_min,
             )
 
+            if start_at_mass_peak:
+                tw = _refine_window_to_mass_peak(df, tw)
+
             yO2 = _parse_o2_fraction(o2_lab)
-            candidates.append((regime_key, int(T_C), float(yO2), o2_lab, df, tw))
+            candidates.append((str(regime_key), int(T_C), float(yO2), str(o2_lab), df, tw))
 
     if not candidates:
         return pd.DataFrame()
 
-    # ---- first pass: find common_hi from Xmax overlap ----
+    # ---- compute common_hi_by_T if enforcing common conversion (carbon basis) ----
+    common_hi_by_T: dict[int, float] = {}
+
     if enforce_common_conversion and conv == "carbon":
-        xmaxs = []
-        for _, _, _, _, df, tw in candidates:
-            xmaxs.append(_carbon_Xmax_in_window(df, tw, ash_fraction=float(ash_fraction)))
-        xmaxs = np.asarray(xmaxs, float)
-        xmaxs = xmaxs[np.isfinite(xmaxs)]
+        # user supplied dict: {225: 0.025, 250: 0.06}
+        if isinstance(common_hi, dict):
+            common_hi_by_T = {int(k): float(v) for k, v in common_hi.items()}
 
-        if xmaxs.size == 0:
-            raise ValueError("Could not compute Xmax for common conversion window (check columns/time windows).")
+        # user supplied scalar: apply to all temps
+        elif common_hi is not None:
+            for T_C in temps_C:
+                common_hi_by_T[int(T_C)] = float(common_hi)
 
-        auto_hi = float(np.min(xmaxs) * common_hi_frac)
-        if common_hi is None:
-            common_hi = max(auto_hi, min_common_hi)
-        # If user explicitly set common_hi, respect it even if tiny.
+        # auto: compute overlap
+        else:
+            if common_per_temperature:
+                # independent overlap for each temperature
+                for T_C in temps_C:
+                    xmaxs = []
+                    for _, TT, _, _, df, tw in candidates:
+                        if int(TT) != int(T_C):
+                            continue
+                        xmaxs.append(_carbon_Xmax_in_window(df, tw, ash_fraction=float(ash_fraction)))
+                    xmaxs = np.asarray(xmaxs, float)
+                    xmaxs = xmaxs[np.isfinite(xmaxs)]
+                    if xmaxs.size == 0:
+                        continue
+                    min_x = float(np.min(xmaxs))
+                    auto_hi = float(min_x * common_hi_frac)
+                    # keep within coverage
+                    hi = max(auto_hi, min_common_hi)
+                    hi = min(hi, min_x)  # never exceed what is available
+                    common_hi_by_T[int(T_C)] = float(hi)
+            else:
+                # one overlap across all 6
+                xmaxs = []
+                for _, _, _, _, df, tw in candidates:
+                    xmaxs.append(_carbon_Xmax_in_window(df, tw, ash_fraction=float(ash_fraction)))
+                xmaxs = np.asarray(xmaxs, float)
+                xmaxs = xmaxs[np.isfinite(xmaxs)]
+                if xmaxs.size == 0:
+                    raise ValueError("Could not compute Xmax for common conversion window (check columns/time windows).")
+                min_x = float(np.min(xmaxs))
+                auto_hi = float(min_x * common_hi_frac)
+                hi = max(auto_hi, min_common_hi)
+                hi = min(hi, min_x)
+                for T_C in temps_C:
+                    common_hi_by_T[int(T_C)] = float(hi)
 
+        if not common_hi_by_T:
+            raise ValueError("enforce_common_conversion=True but could not determine common_hi_by_T.")
+
+    # ---- second pass: fit each run and compare to CR ----
     rows = []
     for regime_key, T_C, yO2, o2_lab, df, tw in candidates:
-        # use a consistent conversion window if requested
         if enforce_common_conversion and conv == "carbon":
+            hi = common_hi_by_T.get(int(T_C), None)
+            if hi is None:
+                # if somehow missing, skip this run
+                continue
             seg = estimate_segment_rate_first_order(
                 df,
                 time_window=tw,
                 label=f"{char_name}_iso_{T_C}C_{o2_lab}",
                 conversion_basis="carbon",
                 ash_fraction=float(ash_fraction),
-                conversion_range=(0.0, float(common_hi)),
+                conversion_range=(0.0, float(hi)),
                 normalize_within_window=False,
             )
+            common_hi_used = float(hi)
         else:
             seg = estimate_segment_rate_first_order(
                 df,
@@ -204,6 +283,7 @@ def compare_cr_to_char_isothermals(
                 alpha_range=alpha_range,
                 normalize_within_window=False,
             )
+            common_hi_used = float("nan")
 
         k_iso = float(seg.r_abs)
         T_mean_K = float(seg.T_mean_K)
@@ -221,10 +301,11 @@ def compare_cr_to_char_isothermals(
             "iso_n_points": int(seg.n_points),
             "time_window": tw,
             "regime": str(regime_key),
-            "common_hi_used": float(common_hi) if (enforce_common_conversion and conv == "carbon") else float("nan"),
+            "common_hi_used": common_hi_used,
         })
 
     return pd.DataFrame(rows).sort_values(["T_C", "yO2"]).reset_index(drop=True)
+
 
 
 def infer_isothermal_time_window(
@@ -340,6 +421,7 @@ def extract_isothermal_segments_from_char_data(
                 trim_start_min=trim_start_min,
                 trim_end_min=trim_end_min,
             )
+            tw = refine_window_to_mass_peak(df, tw, extra_start_min=0.0)
 
             seg = estimate_segment_rate_first_order(
                 df,
@@ -638,3 +720,30 @@ def fit_isothermal_matrix_for_char(*args, **kwargs) -> dict:
     Backward-compatible alias (your main.py calls this for BRF).
     """
     return fit_isothermal_matrix_for_char_loaded(*args, **kwargs)
+
+def refine_window_to_mass_peak(
+    df: pd.DataFrame,
+    time_window: tuple[float, float],
+    *,
+    time_col: str = "time_min",
+    mass_col: str = "mass_pct",
+    extra_start_min: float = 0.0,
+) -> tuple[float, float]:
+    t0, t1 = time_window
+    sel = df[(df[time_col] >= t0) & (df[time_col] <= t1)].copy()
+    if sel.empty:
+        return time_window
+
+    t = pd.to_numeric(sel[time_col], errors="coerce").to_numpy(float)
+    m = pd.to_numeric(sel[mass_col], errors="coerce").to_numpy(float)
+    mask = np.isfinite(t) & np.isfinite(m)
+    t = t[mask]
+    m = m[mask]
+    if t.size < 5:
+        return time_window
+
+    t_peak = float(t[int(np.nanargmax(m))])
+    t0_new = max(float(t0), t_peak + float(extra_start_min))
+    if t1 <= t0_new:
+        return time_window
+    return (t0_new, t1)
