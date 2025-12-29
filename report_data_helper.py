@@ -790,3 +790,661 @@ def plot_isothermal_matrix_feedstock_o2(
         "tex": tex_path if save_tex_snippet else None,
         "chosen_chars": chosen,
     }
+
+# -------------------------
+# Basics: TG conversion curves
+# -------------------------
+
+def _ensure_basics_dirs(char: str, out_root: Path) -> dict[str, Path]:
+    """Create out/{char}/basics/{figures,fits}."""
+    base = Path(out_root) / str(char) / "basics"
+    d = {
+        "base": base,
+        "figures": base / "figures",
+        "fits": base / "fits",
+    }
+    for p in d.values():
+        p.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_stem(s: str) -> str:
+    s = str(s)
+    s = re.sub(r"[^A-Za-z0-9_\-]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s or "plot"
+
+
+def _ash_fraction_for_char(char: str, default: float = 0.0) -> float:
+    """Best-effort ash fraction lookup used for carbon conversion."""
+    try:
+        from tg_math import ASH_FRACTION_DEFAULTS  # type: ignore
+        return float(ASH_FRACTION_DEFAULTS.get(str(char).upper(), default))
+    except Exception:
+        return float(default)
+
+
+def _resolve_ash_fraction_like_tg_math(feedstock: str, fallback: float = 0.0) -> float:
+    """
+    Prefer tg_math._resolve_ash_fraction if present (keeps consistent with your pipeline),
+    otherwise fall back to local defaults.
+    """
+    try:
+        from tg_math import _resolve_ash_fraction  # type: ignore
+        af = float(_resolve_ash_fraction(feedstock, None))
+        if np.isfinite(af):
+            return af
+    except Exception:
+        pass
+    return _ash_fraction_for_char(feedstock, default=fallback)
+
+
+def _compute_alpha_pct_and_x_c(
+    df: pd.DataFrame,
+    *,
+    ash_fraction: float,
+    time_col: str = "time_min",
+    temp_col: str = "temp_C",
+    mass_col: str = "mass_pct",
+    drop_before_mass_max: bool = True,
+) -> pd.DataFrame | None:
+    """
+    Compute alpha_pct and x_c using YOUR definitions:
+
+    alpha_pct:
+      - baseline is the FIRST point of the used slice (after optional drop to mass max):
+          m0 = mass_pct(first)
+          alpha_pct(t) = 100 - (m0 - mass_pct(t))
+
+      => alpha_pct starts at 100 and goes down as mass decreases.
+
+    x_c:
+      - baseline mass is max mass in the segment:
+          mmax = max(mass_pct in segment)
+          x_c(t) = (mmax - mass_pct(t)) / (mmax*(1-ash_fraction))
+
+    Returns a time-series DataFrame with:
+      time_min, time_rel_min, temp_C, mass_pct, alpha_pct, x_c
+    """
+    if df is None or df.empty:
+        return None
+
+    d = df.copy()
+    if time_col not in d.columns or mass_col not in d.columns:
+        return None
+
+    d[time_col] = pd.to_numeric(d[time_col], errors="coerce")
+    d[mass_col] = pd.to_numeric(d[mass_col], errors="coerce")
+    if temp_col in d.columns:
+        d[temp_col] = pd.to_numeric(d[temp_col], errors="coerce")
+
+    d = d.dropna(subset=[time_col, mass_col]).sort_values(time_col)
+    if d.empty or len(d) < 3:
+        return None
+
+    t = d[time_col].to_numpy(float)
+    m = d[mass_col].to_numpy(float)
+
+    if not np.all(np.isfinite(t)) or not np.all(np.isfinite(m)):
+        mask = np.isfinite(t) & np.isfinite(m)
+        t = t[mask]
+        m = m[mask]
+        if temp_col in d.columns:
+            TT = d[temp_col].to_numpy(float)[mask]
+        else:
+            TT = None
+        if len(t) < 3:
+            return None
+    else:
+        TT = d[temp_col].to_numpy(float) if temp_col in d.columns else None
+
+    # --- Use max mass within segment as the reference point for x_c,
+    # and (optionally) drop everything before it so x_c starts at 0 like your tg_math plotting typically does.
+    i_max = int(np.nanargmax(m))
+    if drop_before_mass_max and i_max > 0:
+        t = t[i_max:]
+        m = m[i_max:]
+        if TT is not None:
+            TT = TT[i_max:]
+
+    # time relative to first point of the used slice (which is at mass max if drop_before_mass_max=True)
+    t_rel = t - float(t[0])
+
+    # --- alpha_pct: first point becomes 100, then decreases by absolute mass loss (%-points)
+    m0 = float(m[0])
+    if not np.isfinite(m0):
+        return None
+    alpha_pct = 100.0 - (m0 - m)  # == 100 + m - m0
+
+    # --- x_c: uses max mass in *the used slice*
+    mmax = float(np.nanmax(m))
+    denom = mmax * (1.0 - float(ash_fraction))
+    if not np.isfinite(denom) or denom <= 0.0:
+        # if ash is invalid, just avoid crash and return NaNs for x_c
+        x_c = np.full_like(m, np.nan, dtype=float)
+    else:
+        x_c = (mmax - m) / denom
+
+    out = pd.DataFrame(
+        {
+            "time_min": t,
+            "time_rel_min": t_rel,
+            "temp_C": TT if TT is not None else np.nan,
+            "mass_pct": m,
+            "alpha_pct": alpha_pct,
+            "x_c": x_c,
+        }
+    )
+    return out
+
+
+def _longest_true_run(t: np.ndarray, mask: np.ndarray) -> tuple[int, int] | None:
+    """Return (start_idx, end_idx) of the longest consecutive True-run in `mask` (by time duration)."""
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        return None
+
+    splits = np.where(np.diff(idx) > 1)[0]
+    starts = np.r_[0, splits + 1]
+    ends = np.r_[splits, idx.size - 1]
+
+    best = None
+    best_dur = -np.inf
+    for s, e in zip(starts, ends):
+        i0 = int(idx[s])
+        i1 = int(idx[e])
+        dur = float(t[i1] - t[i0])
+        if dur > best_dur:
+            best_dur = dur
+            best = (i0, i1)
+    return best
+
+
+def _slice_isothermal_hold(
+    df: pd.DataFrame,
+    *,
+    target_temp_C: float,
+    tol_C: float = 2.0,
+    trim_start_min: float = 0.2,
+    trim_end_min: float = 0.2,
+    start_at_mass_peak: bool = True,
+    peak_extra_start_min: float = 0.0,
+    time_col: str = "time_min",
+    temp_col: str = "temp_C",
+    mass_col: str = "mass_pct",
+    # --- NEW controls ---
+    prefer_last_segment_first: bool = True,
+    last_segment_temp_guard_C: float = 3.0,     # if |Tmed - target| > this => do NOT use last segment, try infer
+    min_duration_min: float = 5.0,              # reject any candidate window shorter than this (after trimming/refine)
+    min_points: int = 30,                       # reject any candidate window with fewer points
+    debug: bool = False,
+    ctx: str = "",
+) -> tuple[pd.DataFrame | None, tuple[float, float] | None]:
+    """
+    Infer and slice the hold window of an isothermal experiment.
+
+    Behavior (as requested):
+      1) Try LAST segment first (if available), but ONLY accept if:
+           - duration and points pass thresholds
+           - and |T_median - target| <= last_segment_temp_guard_C
+      2) If last segment is too short OR T_median is off, run infer_isothermal_time_window (strict then loose)
+      3) If still none, fallback to longest temp-run mask near target
+
+    Notes:
+      - After picking a window, optional refine_window_to_mass_peak is applied.
+      - If refine collapses the window, it falls back to the unrefined window.
+    """
+    from tg_helpers import infer_isothermal_time_window, refine_window_to_mass_peak  # local import
+
+    if df is None or df.empty or time_col not in df.columns or temp_col not in df.columns:
+        return (None, None)
+
+    dsort = df.copy()
+    dsort[time_col] = pd.to_numeric(dsort[time_col], errors="coerce")
+    dsort[temp_col] = pd.to_numeric(dsort[temp_col], errors="coerce")
+    if mass_col in dsort.columns:
+        dsort[mass_col] = pd.to_numeric(dsort[mass_col], errors="coerce")
+
+    dsort = dsort.dropna(subset=[time_col, temp_col]).sort_values(time_col)
+    if dsort.empty or len(dsort) < 3:
+        return (None, None)
+
+    def _select_by_tw(tw: tuple[float, float]) -> pd.DataFrame:
+        return dsort[(dsort[time_col] >= float(tw[0])) & (dsort[time_col] <= float(tw[1]))].copy()
+
+    def _is_window_valid(tw: tuple[float, float]) -> tuple[bool, str]:
+        if tw is None:
+            return (False, "tw=None")
+        if not (np.isfinite(tw[0]) and np.isfinite(tw[1])) or tw[1] <= tw[0]:
+            return (False, "invalid tw bounds")
+        sel = _select_by_tw(tw)
+        if sel.shape[0] < int(min_points):
+            return (False, f"too few points ({sel.shape[0]} < {min_points})")
+        dur = float(sel[time_col].max() - sel[time_col].min())
+        if dur < float(min_duration_min):
+            return (False, f"too short duration ({dur:.3f} < {min_duration_min})")
+        return (True, "ok")
+
+    def _tw_from_df(seg_df: pd.DataFrame) -> tuple[float, float] | None:
+        if seg_df is None or seg_df.empty or seg_df.shape[0] < 3:
+            return None
+        tmin = float(seg_df[time_col].min())
+        tmax = float(seg_df[time_col].max())
+        t0 = tmin + float(trim_start_min)
+        t1 = tmax - float(trim_end_min)
+        if t1 <= t0:
+            return None
+        return (t0, t1)
+
+    tw: tuple[float, float] | None = None
+    method: str | None = None
+
+    # ------------------------------------------------------------------
+    # 1) Prefer LAST segment first (but only accept if it's really the hold)
+    # ------------------------------------------------------------------
+    if prefer_last_segment_first and "segment" in dsort.columns:
+        seg_series = dsort["segment"].dropna()
+        if len(seg_series) > 0:
+            last_seg = seg_series.iloc[-1]
+            seg_df = dsort[dsort["segment"] == last_seg].copy()
+
+            # compute median temperature of the segment
+            tmed = float(pd.to_numeric(seg_df[temp_col], errors="coerce").median())
+
+            # only accept segment if temp looks like the target
+            if np.isfinite(tmed) and abs(tmed - float(target_temp_C)) <= float(last_segment_temp_guard_C):
+                tw_cand = _tw_from_df(seg_df)
+                if tw_cand is not None:
+                    ok, why = _is_window_valid(tw_cand)
+                    if ok:
+                        tw = tw_cand
+                        method = f"segment(last={last_seg},Tmed={tmed:.2f})"
+                    elif debug:
+                        print(f"[TG-BASICS][LAST-SEG-REJECT] {ctx} | Tmed={tmed:.2f} | {why} | tw={tw_cand}")
+            else:
+                if debug:
+                    print(
+                        f"[TG-BASICS][LAST-SEG-TMED-OFF] {ctx} | last_seg={last_seg} "
+                        f"| Tmed={tmed:.2f} | target={target_temp_C} | guard={last_segment_temp_guard_C}"
+                    )
+
+    # ------------------------------------------------------------------
+    # 2) If last-segment wasn't accepted, do infer(strict) then infer(loose)
+    # ------------------------------------------------------------------
+    if tw is None:
+        # strict
+        try:
+            tw_cand = infer_isothermal_time_window(
+                dsort,
+                target_temp_C=float(target_temp_C),
+                tol_C=float(tol_C),
+                min_points=int(min_points),
+                min_duration_min=float(min_duration_min),
+                trim_start_min=float(trim_start_min),
+                trim_end_min=float(trim_end_min),
+                time_col=time_col,
+                temp_col=temp_col,
+                mass_col=mass_col,
+            )
+            ok, why = _is_window_valid(tw_cand)
+            if ok:
+                tw = tw_cand
+                method = "infer(strict)"
+            elif debug:
+                print(f"[TG-BASICS][INFER-STRICT-REJECT] {ctx} | {why} | tw={tw_cand}")
+        except Exception as e:
+            if debug:
+                print(f"[TG-BASICS][INFER-STRICT-FAIL] {ctx} | {repr(e)}")
+
+    if tw is None:
+        # loose
+        try:
+            tw_cand = infer_isothermal_time_window(
+                dsort,
+                target_temp_C=float(target_temp_C),
+                tol_C=float(max(tol_C, 6.0)),
+                min_points=max(10, int(min_points // 3)),
+                min_duration_min=max(2.0, float(min_duration_min) / 2.0),
+                trim_start_min=float(trim_start_min),
+                trim_end_min=float(trim_end_min),
+                time_col=time_col,
+                temp_col=temp_col,
+                mass_col=mass_col,
+            )
+            ok, why = _is_window_valid(tw_cand)
+            if ok:
+                tw = tw_cand
+                method = "infer(loose)"
+            elif debug:
+                print(f"[TG-BASICS][INFER-LOOSE-REJECT] {ctx} | {why} | tw={tw_cand}")
+        except Exception as e:
+            if debug:
+                print(f"[TG-BASICS][INFER-LOOSE-FAIL] {ctx} | {repr(e)}")
+
+    # ------------------------------------------------------------------
+    # 3) Fallback: longest contiguous run near target
+    # ------------------------------------------------------------------
+    if tw is None:
+        t = dsort[time_col].to_numpy(float)
+        T = dsort[temp_col].to_numpy(float)
+
+        for thr in (max(float(tol_C), 10.0), 20.0):
+            mask = np.isfinite(t) & np.isfinite(T) & (np.abs(T - float(target_temp_C)) <= float(thr))
+            run = _longest_true_run(t, mask)
+            if run is None:
+                continue
+            i0, i1 = run
+            tmin = float(t[i0])
+            tmax = float(t[i1])
+            if (tmax - tmin) < 2.0:
+                continue
+            tw_cand = (tmin + float(trim_start_min), tmax - float(trim_end_min))
+            ok, why = _is_window_valid(tw_cand)
+            if ok:
+                tw = tw_cand
+                method = f"runmask(thr=±{thr:g}C)"
+                break
+            elif debug:
+                print(f"[TG-BASICS][RUNMASK-REJECT] {ctx} | thr={thr} | {why} | tw={tw_cand}")
+
+    if tw is None:
+        if debug:
+            print(f"[TG-BASICS][ISO-WINDOW-FAIL] {ctx} | target={target_temp_C}C")
+        return (None, None)
+
+    # ------------------------------------------------------------------
+    # Optional refine start to mass peak (but don't allow it to collapse window)
+    # ------------------------------------------------------------------
+    tw_before_refine = tw
+    if start_at_mass_peak:
+        try:
+            tw2 = refine_window_to_mass_peak(dsort, tw, extra_start_min=float(peak_extra_start_min))
+            if tw2[1] > tw2[0]:
+                ok, why = _is_window_valid(tw2)
+                if ok:
+                    tw = tw2
+                else:
+                    # keep old tw if refine makes it too short
+                    tw = tw_before_refine
+                    if debug:
+                        print(f"[TG-BASICS][PEAK-REFINE-REJECT] {ctx} | {why} | tw2={tw2} | keep={tw_before_refine}")
+        except Exception as e:
+            if debug:
+                print(f"[TG-BASICS][PEAK-REFINE-FAIL] {ctx} | {repr(e)}")
+
+    sel = _select_by_tw(tw)
+    if sel.empty or len(sel) < 3:
+        if debug:
+            print(f"[TG-BASICS][ISO-EMPTY] {ctx} | method={method} | tw={tw}")
+        return (None, tw)
+
+    if debug:
+        tmed = float(pd.to_numeric(sel[temp_col], errors="coerce").median())
+        dur = float(sel[time_col].max() - sel[time_col].min())
+        print(f"[TG-BASICS][ISO-OK] {ctx} | method={method} | tw={tw} | n={sel.shape[0]} | dur={dur:.2f} | Tmed={tmed:.2f}")
+
+    return (sel, tw)
+
+
+
+
+def create_tg_graphs_for_char(
+    char: str,
+    char_data: dict,
+    *,
+    out_root: Path = Path("out"),
+    conversion_basis: str = "both",
+    figure_mode: str = "overlay",  # 'overlay' | 'separate' | 'both'
+    o2_order: tuple[str, ...] = ("5%", "10%", "20%"),
+    tol_C: float = 2.0,
+    trim_start_min: float = 0.2,
+    trim_end_min: float = 0.2,
+    start_at_mass_peak: bool = True,
+    peak_extra_start_min: float = 0.0,
+    ramp_time_window: tuple[float, float] | None = None,
+    debug: bool = False,
+) -> dict:
+    """
+    Exports:
+      - out/{char}/basics/fits/tg_conversions.csv              (SUMMARY in your requested format)
+      - out/{char}/basics/fits/tg_conversions_timeseries.csv   (FULL timeseries)
+      - out/{char}/basics/figures/*.png
+
+    Summary columns (exactly):
+      char,regime,o2,time_window,kind,total_alpha_conversion,total_Xc_conversion
+
+    Definitions:
+      total_alpha_conversion = max mass loss in the window (in %-points) = 100 - min(alpha_pct)
+      total_Xc_conversion    = max(x_c) in the window (fraction)
+    """
+    dirs = _ensure_basics_dirs(char, Path(out_root))
+    ash = _resolve_ash_fraction_like_tg_math(str(char), fallback=0.0)
+
+    conv_choice = str(conversion_basis).strip().lower()
+    if conv_choice not in {"alpha", "carbon", "both"}:
+        conv_choice = "both"
+
+    fig_mode = str(figure_mode).strip().lower()
+    if fig_mode not in {"overlay", "separate", "both"}:
+        fig_mode = "overlay"
+
+    rows_ts: list[pd.DataFrame] = []
+    rows_sum: list[dict] = {}
+    rows_sum_list: list[dict] = []
+    regime_series: dict[str, dict[str, pd.DataFrame]] = {}
+
+    for regime, o2_map in (char_data or {}).items():
+        if not isinstance(o2_map, dict):
+            continue
+
+        regime_key = str(regime)
+        is_iso = "isotherm" in regime_key.lower()
+
+        target_T = None
+        if is_iso:
+            mT = re.search(r"(\d{3})", regime_key)
+            if mT:
+                try:
+                    target_T = float(int(mT.group(1)))
+                except Exception:
+                    target_T = None
+
+        present = list(o2_map.keys())
+        ordered = [k for k in o2_order if k in present] + [k for k in present if k not in o2_order]
+
+        for o2_lab in ordered:
+            df = o2_map.get(o2_lab, None)
+            if not _is_df(df):
+                continue
+
+            df_use = None
+            tw = None
+
+            if is_iso and target_T is not None:
+                ctx = f"{char} | {regime_key} | {o2_lab}"
+                df_use, tw = _slice_isothermal_hold(
+                    df,
+                    target_temp_C=target_T,
+                    tol_C=tol_C,
+                    trim_start_min=trim_start_min,
+                    trim_end_min=trim_end_min,
+                    start_at_mass_peak=start_at_mass_peak,
+                    peak_extra_start_min=peak_extra_start_min,
+                    debug=debug,
+                    ctx=ctx,
+                )
+                if df_use is None:
+                    if debug:
+                        print(f"[TG-BASICS][SKIP] {ctx}: could not infer hold window")
+                    continue
+            else:
+                df_use = df.copy()
+                if ramp_time_window is not None and len(ramp_time_window) == 2:
+                    t0, t1 = float(ramp_time_window[0]), float(ramp_time_window[1])
+                    df_use = df_use[(df_use["time_min"] >= t0) & (df_use["time_min"] <= t1)].copy()
+
+            conv = _compute_alpha_pct_and_x_c(df_use, ash_fraction=ash, drop_before_mass_max=True)
+            if conv is None or conv.empty:
+                continue
+
+            # annotate timeseries
+            conv.insert(0, "char", str(char))
+            conv.insert(1, "regime", regime_key)
+            conv.insert(2, "o2", str(o2_lab))
+            conv.insert(3, "ash_fraction", float(ash))
+            conv.insert(4, "time_window", f"{tw[0]:.3f},{tw[1]:.3f}" if tw is not None else "")
+            conv.insert(5, "kind", "isothermal" if is_iso else "linear")
+
+            rows_ts.append(conv)
+            regime_series.setdefault(regime_key, {})[str(o2_lab)] = conv
+
+            # summary totals (per your required CSV)
+            alpha_pct_min = float(np.nanmin(conv["alpha_pct"].to_numpy(float))) if "alpha_pct" in conv.columns else np.nan
+            total_alpha_conv = 100.0 - alpha_pct_min if np.isfinite(alpha_pct_min) else np.nan
+
+            total_xc = float(np.nanmax(conv["x_c"].to_numpy(float))) if "x_c" in conv.columns else np.nan
+
+            rows_sum_list.append(
+                {
+                    "char": str(char),
+                    "regime": regime_key,
+                    "o2": str(o2_lab),
+                    "time_window": f"{tw[0]:.3f},{tw[1]:.3f}" if tw is not None else "",
+                    "kind": "isothermal" if is_iso else "linear",
+                    "total_alpha_conversion": total_alpha_conv,
+                    "total_Xc_conversion": total_xc,
+                }
+            )
+
+    # --- export SUMMARY CSV (exact format requested) ---
+    csv_summary_path = dirs["fits"] / "tg_conversions.csv"
+    df_sum = pd.DataFrame(
+        rows_sum_list,
+        columns=[
+            "char",
+            "regime",
+            "o2",
+            "time_window",
+            "kind",
+            "total_alpha_conversion",
+            "total_Xc_conversion",
+        ],
+    )
+    df_sum.to_csv(csv_summary_path, index=False)
+
+    # --- export FULL timeseries (audit + plot inputs) ---
+    csv_ts_path = dirs["fits"] / "tg_conversions_timeseries.csv"
+    if rows_ts:
+        df_ts = pd.concat(rows_ts, ignore_index=True)
+        df_ts.to_csv(csv_ts_path, index=False)
+    else:
+        pd.DataFrame().to_csv(csv_ts_path, index=False)
+
+    # --- plots ---
+    for regime_key, o2_map in regime_series.items():
+        is_iso = "isotherm" in regime_key.lower()
+
+        # x axis: time in hold (after drop_before_mass_max => starts at 0 at mass max)
+        x_col = "time_rel_min"
+        x_lab = "Time (min)"
+
+        o2_keys = [k for k in o2_order if k in o2_map] + [k for k in o2_map.keys() if k not in o2_order]
+
+        def _plot_overlay(y_col: str, y_lab: str, suffix: str):
+            fig, ax = plt.subplots(figsize=(6.8, 4.8))
+            drew = False
+            for o2_lab in o2_keys:
+                dfc = o2_map.get(o2_lab)
+                if dfc is None or dfc.empty:
+                    continue
+                xx = pd.to_numeric(dfc.get(x_col, np.nan), errors="coerce").to_numpy(float)
+                yy = pd.to_numeric(dfc.get(y_col, np.nan), errors="coerce").to_numpy(float)
+                mask = np.isfinite(xx) & np.isfinite(yy)
+                if mask.sum() < 3:
+                    continue
+                order = np.argsort(xx[mask])
+                ax.plot(xx[mask][order], yy[mask][order], label=str(o2_lab))
+                drew = True
+            if not drew:
+                plt.close(fig)
+                return
+            ax.set_xlabel(x_lab)
+            ax.set_ylabel(y_lab)
+            ax.set_title(f"{char} — {regime_key} ({suffix})")
+            ax.legend(title="O$_2$", loc="best")
+            fig.tight_layout()
+            out = dirs["figures"] / f"{_safe_stem(regime_key)}_{suffix}.png"
+            fig.savefig(out, dpi=200, bbox_inches="tight")
+            plt.close(fig)
+
+        def _plot_separate(y_col: str, y_lab: str, suffix: str):
+            for o2_lab in o2_keys:
+                dfc = o2_map.get(o2_lab)
+                if dfc is None or dfc.empty:
+                    continue
+                xx = pd.to_numeric(dfc.get(x_col, np.nan), errors="coerce").to_numpy(float)
+                yy = pd.to_numeric(dfc.get(y_col, np.nan), errors="coerce").to_numpy(float)
+                mask = np.isfinite(xx) & np.isfinite(yy)
+                if mask.sum() < 3:
+                    continue
+                order = np.argsort(xx[mask])
+                fig, ax = plt.subplots(figsize=(6.8, 4.8))
+                ax.plot(xx[mask][order], yy[mask][order])
+                ax.set_xlabel(x_lab)
+                ax.set_ylabel(y_lab)
+                ax.set_title(f"{char} — {regime_key} — {o2_lab} ({suffix})")
+                fig.tight_layout()
+                out = dirs["figures"] / f"{_safe_stem(regime_key)}__{_safe_stem(o2_lab)}_{suffix}.png"
+                fig.savefig(out, dpi=200, bbox_inches="tight")
+                plt.close(fig)
+
+        # alpha basis = alpha_pct
+        if conv_choice in {"alpha", "both"}:
+            if fig_mode in {"overlay", "both"}:
+                _plot_overlay("alpha_pct", r"$\alpha$ (%)", "alpha")
+            if fig_mode in {"separate", "both"}:
+                _plot_separate("alpha_pct", r"$\alpha$ (%)", "alpha")
+
+        # carbon basis = x_c
+        if conv_choice in {"carbon", "both"}:
+            if fig_mode in {"overlay", "both"}:
+                _plot_overlay("x_c", r"$X_C$ (-)", "carbon")
+            if fig_mode in {"separate", "both"}:
+                _plot_separate("x_c", r"$X_C$ (-)", "carbon")
+
+    return {
+        "char": char,
+        "csv_summary": csv_summary_path,
+        "csv_timeseries": csv_ts_path,
+        "figures_dir": dirs["figures"],
+        "fits_dir": dirs["fits"],
+    }
+
+
+def create_tg_graphs_all(
+    data: dict,
+    *,
+    out_root: Path = Path("out"),
+    conversion_basis: str = "both",
+    figure_mode: str = "overlay",
+    debug: bool = False,
+) -> dict[str, dict]:
+    """Run create_tg_graphs_for_char(...) for every char in the loaded `data` dict."""
+    out: dict[str, dict] = {}
+    for char, char_data in (data or {}).items():
+        try:
+            if debug:
+                print(f"[TG-BASICS] {char}: exporting TG conversion curves")
+            out[str(char)] = create_tg_graphs_for_char(
+                str(char),
+                char_data,
+                out_root=Path(out_root),
+                conversion_basis=conversion_basis,
+                figure_mode=figure_mode,
+                debug=debug,
+            )
+        except Exception as e:
+            if debug:
+                print(f"[TG-BASICS][ERROR] {char}: {e}")
+            out[str(char)] = {"error": str(e)}
+    return out

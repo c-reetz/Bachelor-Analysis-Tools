@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import matplotlib
 
-from report_data_helper import run_char, _export_table, ReportConfig, plot_isothermal_matrix_feedstock_o2
+from report_data_helper import run_char, _export_table, ReportConfig, plot_isothermal_matrix_feedstock_o2, create_tg_graphs_all
 
 matplotlib.use("Agg")
 from tg_loader import load_all_thermogravimetric_data, SPEC
@@ -44,18 +44,22 @@ COMPARE_CFG = dict(
     min_common_hi=0.01,
     trim_start_min=0.2,
     trim_end_min=0.2,
+    debug=True,
+    skip_on_error= True,
+    min_points_for_fit=20
 )
-COMPARE_CFG.update({
-    "debug": True,
-    "skip_on_error": True,
-    "min_points_for_fit": 20,  # bump if you want stricter
-})
 
 
 DO_CR_FITS = True
 DO_CR_WINDOW_SENSITIVITY = True
 DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS = True
 DO_ISOTHERMAL_GLOBAL_BENCHMARK = True
+DO_CREATE_TG_GRAPHS = True
+# 'alpha', 'carbon', 'both'
+TG_GRAPH_CONVERSION_BASIS = "both"
+# 'overlay' (one fig per regime), 'separate' (one fig per regime+O2), or 'both'
+TG_GRAPH_FIGURE_MODE = "overlay"
+
 
 
 def main():
@@ -111,18 +115,14 @@ def main():
 
     print("\nDone. Results written to:", OUT_ROOT.resolve())
 
-    matrix_out = plot_isothermal_matrix_feedstock_o2(
-        data,
-        hold_temp_C=225,
-        feedstocks=["BRF", "WS", "PW"],
-        o2_order=["5%", "10%", "20%"],
-        out_dir=OUT_ROOT / "figures",
-        trim_start_min=0,
-        trim_end_min=0,
-        save_tex_snippet=True,
-    )
-    print("[Matrix] saved:", matrix_out["png"])
-    print("[Matrix] chosen chars:", matrix_out["chosen_chars"])
+    if DO_CREATE_TG_GRAPHS:
+        create_tg_graphs_all(
+            data,
+            out_root=OUT_ROOT,
+            conversion_basis=TG_GRAPH_CONVERSION_BASIS,
+            figure_mode=TG_GRAPH_FIGURE_MODE,  # <-- add this
+            debug=COMPARE_CFG["debug"],
+        )
 
 
 if __name__ == "__main__":

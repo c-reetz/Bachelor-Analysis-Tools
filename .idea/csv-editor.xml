@@ -3,6 +3,20 @@
   <component name="CsvFileAttributes">
     <option name="attributeMap">
       <map>
+        <entry key="/out/BRF/basics/fits/tg_conversions.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/BRF/basics/fits/tg_conversions_timeseries.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/BRF/tables/cr_vs_isothermal_global.csv">
           <value>
             <Attribute>
@@ -24,7 +38,35 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/out/PW/basics/fits/tg_conversions.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/PW/basics/fits/tg_conversions_timeseries.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/PW/tables/cr_vs_isothermal_global.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/PW/tables/isothermal_extracted_k.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/WS/basics/fits/tg_conversions.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />
