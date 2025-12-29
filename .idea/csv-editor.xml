@@ -24,6 +24,13 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/out/PW/tables/cr_vs_isothermal_global.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/WS/tables/cr_vs_isothermal_global.csv">
           <value>
             <Attribute>
@@ -32,6 +39,13 @@
           </value>
         </entry>
         <entry key="/out/WS/tables/isothermal_extracted_k.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/summary_fit_params.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />

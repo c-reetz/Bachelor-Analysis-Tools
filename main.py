@@ -30,6 +30,9 @@ CR_WINDOWS = [
     ("CR_std_0p10_0p80", (0.10, 0.80)),
     ("CR_mid_0p05_0p20", (0.05, 0.20)),
     ("CR_early_0p00_0p06", (0.00, 0.06)),
+    ("CR__mid-late_0p25_0p55", (0.25, 0.55)),
+    ("CR_late-stage_0p55_0p90", (0.55, 0.90)),
+    ("CR_oxygen-fit-check_0p10-0p60", (0.10, 0.60)),
 ]
 
 COMPARE_CFG = dict(
@@ -111,12 +114,11 @@ def main():
     matrix_out = plot_isothermal_matrix_feedstock_o2(
         data,
         hold_temp_C=225,
-        charT=500,  # set None if you want "best available per feedstock"
         feedstocks=["BRF", "WS", "PW"],
         o2_order=["5%", "10%", "20%"],
         out_dir=OUT_ROOT / "figures",
-        trim_start_min=0.2,
-        trim_end_min=0.2,
+        trim_start_min=0,
+        trim_end_min=0,
         save_tex_snippet=True,
     )
     print("[Matrix] saved:", matrix_out["png"])
