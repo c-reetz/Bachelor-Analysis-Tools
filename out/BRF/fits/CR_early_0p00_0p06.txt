@@ -1,9 +1,0 @@
-{'label': 'BRF ramps global O2 fit (CR_early_0p00_0p06)',
- 'n_solid': 1.0,
- 'alpha_range_used': (0.0, 0.06),
- 'time_window_used': (32.0, 195.0),
- 'beta_K_per_time': 3.0,
- 'E_A_kJ_per_mol': 22.643221979317747,
- 'A': 0.07759436316441312,
- 'm_o2': -0.2590374404525992,
- 'r2': 0.8026281361808185}
