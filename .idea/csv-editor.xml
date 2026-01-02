@@ -17,6 +17,20 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/out/BRF/tables/cr_fit_params.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/BRF/tables/cr_vs_isothermal.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/BRF/tables/cr_vs_isothermal_global.csv">
           <value>
             <Attribute>
@@ -52,7 +66,28 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/out/PW/tables/cr_fit_params.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/PW/tables/cr_vs_isothermal.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/PW/tables/cr_vs_isothermal_global.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/PW/tables/cr_window_sensitivity.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />
@@ -73,6 +108,27 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/out/WS/basics/fits/tg_conversions_timeseries.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/WS/tables/cr_fit_params.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/WS/tables/cr_vs_isothermal.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/WS/tables/cr_vs_isothermal_global.csv">
           <value>
             <Attribute>
@@ -81,6 +137,20 @@
           </value>
         </entry>
         <entry key="/out/WS/tables/isothermal_extracted_k.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/hold_overlays/BRF/sim_hold_summary_carbon.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/ramp_overlays/PW/ramp_overlay_summary.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />

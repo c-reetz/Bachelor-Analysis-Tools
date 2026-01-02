@@ -83,7 +83,6 @@ def _is_df(x) -> bool:
 
 
 def _filter_kwargs(func, kwargs: dict) -> dict:
-    """Pass only kwargs that the function actually accepts (keeps main.py compatible during refactors)."""
     try:
         sig = inspect.signature(func)
         allowed = set(sig.parameters.keys())

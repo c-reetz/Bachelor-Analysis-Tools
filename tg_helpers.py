@@ -3,11 +3,21 @@ import numpy as np
 from pprint import pprint, pformat
 import re
 import pandas as pd
-from tg_math import estimate_segment_rate_first_order, ASH_FRACTION_DEFAULTS, GlobalO2ArrheniusFit, \
-    estimate_global_arrhenius_with_o2_from_segments
+from tg_math import (
+    estimate_segment_rate_first_order,
+    ASH_FRACTION_DEFAULTS,
+    GlobalO2ArrheniusFit,
+    estimate_global_arrhenius_with_o2_from_segments,
+    _resolve_ash_fraction,
+    _compute_Xc_and_w_from_mass,
+    _compute_alpha_w,
+    simulate_alpha_ramp,
+    alpha_to_mass_pct,
+)
 from tg_math import GlobalCR_O2_Result
 from tg_loader import SPEC #debug
-
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 R_GAS = 8.314462618
 
@@ -1011,3 +1021,580 @@ def refine_window_to_mass_peak(
     if t1 <= t0_new:
         return time_window
     return (t0_new, t1)
+
+
+def simulate_isothermal_holds_from_cr(
+    cr: GlobalCR_O2_Result,
+    char_data: dict,
+    *,
+    char_name: str,
+    out_dir: str | Path,
+    temps_C: tuple[int, ...] = (225, 250),
+    o2_labels: tuple[str, ...] = ("5%", "10%", "20%"),
+    conversion_basis: str = "carbon",   # "carbon" -> X_C, "alpha" -> alpha
+    ash_fraction: float | None = None,
+    # window inference + selection
+    tol_C: float = 2.0,
+    trim_start_min: float = 0.2,
+    trim_end_min: float = 0.2,
+    start_at_mass_peak: bool = True,
+    peak_extra_start_min: float = 0.0,
+    min_points: int = 20,
+    # common conversion window (carbon only)
+    enforce_common_conversion: bool = True,
+    common_hi: float | dict[int, float] | None = None,
+    common_hi_frac: float = 0.90,
+    min_common_hi: float = 0.01,
+    common_per_temperature: bool = True,
+    use_common_window_for_curves: bool = False,  # keep False for full-hold overlays
+    # outputs
+    make_plots: bool = True,
+    export_csv: bool = True,
+    debug: bool = False,
+):
+    """
+    Simulate and overlay isothermal holds: measured TG vs CR-predicted (mass + conversion).
+    Adds R^2_mass and R^2_conv as extra lines in the TOP legend (same location/box).
+
+    Writes:
+      - sim_hold_<...>_<basis>.csv
+      - sim_hold_<...>_<basis>.png
+    Returns:
+      - summary DataFrame with per-run R^2 fields
+    """
+    from pathlib import Path
+    import numpy as np
+    import pandas as pd
+
+    conv = str(conversion_basis).lower().strip()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---------- local helpers ----------
+    def r2_score_safe(y_true, y_pred, *, min_n: int = 5, eps: float = 1e-16) -> float:
+        y_true = np.asarray(y_true, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+        mask = np.isfinite(y_true) & np.isfinite(y_pred)
+        if mask.sum() < min_n:
+            return float("nan")
+        yt = y_true[mask]
+        yp = y_pred[mask]
+        ss_res = float(np.sum((yt - yp) ** 2))
+        ss_tot = float(np.sum((yt - float(np.mean(yt))) ** 2))
+        if ss_tot < eps:
+            return float("nan")
+        return 1.0 - ss_res / ss_tot
+
+    def fmt_r2(x: float) -> str:
+        return "n/a" if (x is None) or (not np.isfinite(x)) else f"{x:.3f}"
+
+    # Resolve ash fraction default if needed
+    if conv == "carbon" and ash_fraction is None:
+        ash_fraction = ASH_FRACTION_DEFAULTS[str(char_name).upper()]
+    if conv == "carbon":
+        ash_fraction = float(_resolve_ash_fraction(str(char_name), float(ash_fraction)))
+
+    # ---- collect isothermal candidates (for common_hi computation) ----
+    candidates: list[dict] = []
+    for regime_key, o2_map in char_data.items():
+        if "isotherm" not in str(regime_key).lower():
+            continue
+
+        T_C = _parse_temp_from_regime_key(regime_key)
+        if T_C is None or int(T_C) not in temps_C:
+            continue
+        if not isinstance(o2_map, dict):
+            continue
+
+        for o2_lab in o2_labels:
+            df = o2_map.get(o2_lab, None)
+            if df is None or not _valid_df(df):
+                continue
+
+            src = SPEC.get(str(char_name).upper(), {}).get(str(regime_key), {}).get(str(o2_lab), None)
+
+            try:
+                tw = infer_isothermal_time_window(
+                    df,
+                    target_temp_C=float(T_C),
+                    tol_C=tol_C,
+                    trim_start_min=trim_start_min,
+                    trim_end_min=trim_end_min,
+                )
+                if start_at_mass_peak:
+                    tw = refine_window_to_mass_peak(df, tw, extra_start_min=float(peak_extra_start_min))
+            except Exception as e:
+                if debug:
+                    print(f"[SIM-HOLD][SKIP] window inference failed | {char_name} | {regime_key} | {o2_lab} | src={src} | err={e}")
+                continue
+
+            candidates.append(dict(
+                char=str(char_name),
+                regime=str(regime_key),
+                T_C=int(T_C),
+                o2_label=str(o2_lab),
+                yO2=float(_parse_o2_fraction(o2_lab)),
+                src=src,
+                df=df,
+                time_window=tw,
+            ))
+
+    if not candidates:
+        if debug:
+            print(f"[SIM-HOLD] No candidates found for {char_name}.")
+        return pd.DataFrame([])
+
+    # ---- compute common_hi_by_T if requested (carbon only) ----
+    common_hi_by_T: dict[int, float] = {}
+    if (conv == "carbon") and enforce_common_conversion:
+        if isinstance(common_hi, dict):
+            common_hi_by_T = {int(k): float(v) for k, v in common_hi.items()}
+        elif isinstance(common_hi, (int, float)):
+            for T in temps_C:
+                common_hi_by_T[int(T)] = float(common_hi)
+        else:
+            if common_per_temperature:
+                for T in temps_C:
+                    xmaxs = []
+                    for c in candidates:
+                        if int(c["T_C"]) != int(T):
+                            continue
+                        xmaxs.append(_carbon_Xmax_in_window(c["df"], c["time_window"], ash_fraction=float(ash_fraction)))
+                    xmaxs = np.asarray(xmaxs, float)
+                    xmaxs = xmaxs[np.isfinite(xmaxs)]
+                    if xmaxs.size == 0:
+                        continue
+                    min_x = float(np.min(xmaxs))
+                    hi = max(float(min_x * common_hi_frac), float(min_common_hi))
+                    hi = min(hi, min_x)
+                    common_hi_by_T[int(T)] = float(hi)
+            else:
+                xmaxs = []
+                for c in candidates:
+                    xmaxs.append(_carbon_Xmax_in_window(c["df"], c["time_window"], ash_fraction=float(ash_fraction)))
+                xmaxs = np.asarray(xmaxs, float)
+                xmaxs = xmaxs[np.isfinite(xmaxs)]
+                if xmaxs.size == 0:
+                    raise ValueError("simulate_isothermal_holds_from_cr: could not compute Xmax for common conversion window.")
+                min_x = float(np.min(xmaxs))
+                hi = max(float(min_x * common_hi_frac), float(min_common_hi))
+                hi = min(hi, min_x)
+                for T in temps_C:
+                    common_hi_by_T[int(T)] = float(hi)
+
+        if debug:
+            print(f"[SIM-HOLD] common_hi_by_T({char_name}) = {common_hi_by_T}")
+
+    rows = []
+    for c in candidates:
+        df = c["df"]
+        t0, t1 = map(float, c["time_window"])
+
+        sel = df[(df["time_min"] >= t0) & (df["time_min"] <= t1)].copy()
+        sel["time_min"] = pd.to_numeric(sel["time_min"], errors="coerce")
+        sel["temp_C"] = pd.to_numeric(sel.get("temp_C", np.nan), errors="coerce")
+        sel["mass_pct"] = pd.to_numeric(sel.get("mass_pct", np.nan), errors="coerce")
+        sel = sel.dropna(subset=["time_min", "temp_C", "mass_pct"]).sort_values("time_min")
+
+        if sel.shape[0] < int(min_points):
+            if debug:
+                print(f"[SIM-HOLD][SKIP] too few points | {c['char']} | {c['regime']} | {c['o2_label']} | n={sel.shape[0]} | tw={c['time_window']}")
+            continue
+
+        t_abs = sel["time_min"].to_numpy(float)
+        t_rel = t_abs - float(t_abs[0])
+        T_C_trace = sel["temp_C"].to_numpy(float)
+        m_meas = sel["mass_pct"].to_numpy(float)
+        yO2 = float(c["yO2"])
+
+        common_hi_used = float("nan")
+        if (conv == "carbon") and enforce_common_conversion and common_hi_by_T:
+            common_hi_used = float(common_hi_by_T.get(int(c["T_C"]), float("nan")))
+
+        # ---------- measured + predicted ----------
+        if conv == "carbon":
+            X_meas, _, m0_top = _compute_Xc_and_w_from_mass(m_meas, ash_fraction=float(ash_fraction))
+            X0 = float(X_meas[0]) if np.isfinite(X_meas[0]) else 0.0
+
+            # simulate (treat alpha as X_C)
+            X_pred = simulate_alpha_ramp(
+                time_min=t_rel,
+                temp_C=T_C_trace,
+                yO2=yO2,
+                E_A_J_per_mol=float(cr.E_A_J_per_mol),
+                A=float(cr.A),
+                m_o2=float(cr.m_o2),
+                solid_order=int(round(getattr(cr, "n_solid", 1))),
+                alpha0=X0,
+            )
+
+            m_inf = float(m0_top) * float(ash_fraction)
+            m_pred = alpha_to_mass_pct(X_pred, m0=float(m0_top), m_inf=float(m_inf), loss=True)
+
+            if use_common_window_for_curves and np.isfinite(common_hi_used):
+                mask = np.isfinite(X_meas) & (X_meas >= 0.0) & (X_meas <= common_hi_used)
+                if np.sum(mask) >= int(min_points):
+                    t_abs, t_rel = t_abs[mask], t_rel[mask]
+                    T_C_trace = T_C_trace[mask]
+                    m_meas = m_meas[mask]
+                    X_meas = X_meas[mask]
+                    X_pred = X_pred[mask]
+                    m_pred = m_pred[mask]
+
+            conv_ylabel = r"Carbon conversion, $X_C$ (-)"
+            key_meas, key_pred = "Xc_meas", "Xc_pred"
+
+        elif conv == "alpha":
+            alpha_meas, _, m0_used, m_inf_used = _compute_alpha_w(m_meas)
+            X0 = float(alpha_meas[0]) if np.isfinite(alpha_meas[0]) else 0.0
+
+            X_pred = simulate_alpha_ramp(
+                time_min=t_rel,
+                temp_C=T_C_trace,
+                yO2=yO2,
+                E_A_J_per_mol=float(cr.E_A_J_per_mol),
+                A=float(cr.A),
+                m_o2=float(cr.m_o2),
+                solid_order=int(round(getattr(cr, "n_solid", 1))),
+                alpha0=X0,
+            )
+            m_pred = alpha_to_mass_pct(X_pred, m0=float(m0_used), m_inf=float(m_inf_used), loss=True)
+            X_meas = alpha_meas
+
+            conv_ylabel = r"Conversion, $\alpha$ (-)"
+            key_meas, key_pred = "alpha_meas", "alpha_pred"
+
+        else:
+            raise ValueError("conversion_basis must be 'carbon' or 'alpha'")
+
+        # ---------- R^2 computed on what we actually plot ----------
+        r2_mass = r2_score_safe(m_meas, m_pred)
+        r2_conv = r2_score_safe(X_meas, X_pred)
+
+        # ---------- export ----------
+        stem = f"{c['char']}_{c['T_C']}C_{c['o2_label'].replace('%','pct')}"
+        csv_path = out_dir / f"sim_hold_{stem}_{conv}.csv"
+        fig_path = out_dir / f"sim_hold_{stem}_{conv}.png"
+
+        out = pd.DataFrame({
+            "time_min": t_abs,
+            "time_rel_min": t_rel,
+            "temp_C": T_C_trace,
+            "mass_pct": m_meas,
+            "mass_pred_pct": m_pred,
+            key_meas: X_meas,
+            key_pred: X_pred,
+            "k_CR_pred_at_Tmean_1_per_min": predict_k_from_cr(
+                cr, T_K=float(np.nanmean(T_C_trace) + 273.15), yO2=float(yO2)
+            ),
+            "common_hi_used": float(common_hi_used),
+            "r2_mass": float(r2_mass) if np.isfinite(r2_mass) else np.nan,
+            "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
+            "src": c["src"],
+        })
+        if export_csv:
+            out.to_csv(csv_path, index=False)
+
+        if make_plots:
+            from matplotlib.lines import Line2D
+
+            fig, (axm, axx) = plt.subplots(2, 1, figsize=(7.2, 6.2), sharex=True)
+
+            axm.plot(t_rel, m_meas, "-", label="measured")
+            axm.plot(t_rel, m_pred, "--", label="CR-predicted")
+            axm.set_ylabel("Mass (%)")
+            axm.set_title(
+                f"{c['char']} {c['T_C']}°C {c['o2_label']} | CR='{getattr(cr, 'label', '')}'"
+            )
+
+            # Legend + R2 in same box (upper right)
+            handles, labels = axm.get_legend_handles_labels()
+            handles += [
+                Line2D([], [], linestyle="none", label=rf"$R^2_{{mass}}$ = {fmt_r2(r2_mass)}"),
+                Line2D([], [], linestyle="none", label=rf"$R^2_{{conv}}$ = {fmt_r2(r2_conv)}"),
+            ]
+            axm.legend(
+                handles=handles,
+                loc="upper right",
+                frameon=True,
+                handlelength=2.0,
+                handletextpad=0.6
+,
+            )
+
+            axx.plot(t_rel, X_meas, "-", label="measured")
+            axx.plot(t_rel, X_pred, "--", label="CR-predicted")
+            axx.set_xlabel("Time (min)")
+            axx.set_ylabel(conv_ylabel)
+            axx.legend(loc="best")
+
+            fig.tight_layout()
+            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+        rows.append({
+            "char": c["char"],
+            "regime": c["regime"],
+            "T_C": float(c["T_C"]),
+            "o2_label": c["o2_label"],
+            "yO2": float(yO2),
+            "time_window": c["time_window"],
+            "common_hi_used": float(common_hi_used),
+            "r2_mass": float(r2_mass) if np.isfinite(r2_mass) else np.nan,
+            "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
+            "csv_path": str(csv_path),
+            "fig_path": str(fig_path) if make_plots else "",
+        })
+
+    return pd.DataFrame(rows).sort_values(["T_C", "yO2"]).reset_index(drop=True)
+
+
+def plot_linear_ramp_overlays_from_cr(
+    cr: GlobalCR_O2_Result,
+    char_data: dict,
+    *,
+    char_name: str,
+    out_dir: str | Path,
+    template_o2_label: str = "10%",
+    yO2_targets: tuple[float, ...] = (0.05, 0.10, 0.20),
+    conversion_basis: str = "carbon",  # "carbon" recommended for X_C
+    ash_fraction: float | None = None,
+    make_plots: bool = True,
+    export_csv: bool = True,
+    debug: bool = False,
+):
+    """
+    Simulate full linear ramps using CR parameters and overlay measured vs predicted
+    (mass + conversion vs temperature). Adds R^2 lines inside the TOP legend.
+    """
+    from pathlib import Path
+    import numpy as np
+    import pandas as pd
+
+    conv = str(conversion_basis).lower().strip()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---------- local helpers ----------
+    def r2_score_safe(y_true, y_pred, *, min_n: int = 5, eps: float = 1e-16) -> float:
+        y_true = np.asarray(y_true, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+        mask = np.isfinite(y_true) & np.isfinite(y_pred)
+        if mask.sum() < min_n:
+            return float("nan")
+        yt = y_true[mask]
+        yp = y_pred[mask]
+        ss_res = float(np.sum((yt - yp) ** 2))
+        ss_tot = float(np.sum((yt - float(np.mean(yt))) ** 2))
+        if ss_tot < eps:
+            return float("nan")
+        return 1.0 - ss_res / ss_tot
+
+    def fmt_r2(x: float) -> str:
+        return "n/a" if (x is None) or (not np.isfinite(x)) else f"{x:.3f}"
+
+    if conv not in ("carbon", "alpha"):
+        raise ValueError("conversion_basis must be 'carbon' or 'alpha'")
+
+    # locate linear ramp map
+    linear_map = None
+    if "linear" in char_data and isinstance(char_data["linear"], dict):
+        linear_map = char_data["linear"]
+    else:
+        for k, v in char_data.items():
+            if "linear" in str(k).lower() and isinstance(v, dict):
+                linear_map = v
+                break
+    if linear_map is None:
+        raise KeyError(f"No linear ramp datasets found for {char_name} (expected key 'linear').")
+
+    # template ramp
+    df_template = linear_map.get(template_o2_label, None)
+    if df_template is None:
+        for _, df_any in linear_map.items():
+            if _valid_df(df_any):
+                df_template = df_any
+                template_o2_label = "available"
+                break
+    if df_template is None or not _valid_df(df_template):
+        raise ValueError(f"No valid ramp dataframe found for {char_name}.")
+
+    # resolve ash
+    if conv == "carbon" and ash_fraction is None:
+        ash_fraction = ASH_FRACTION_DEFAULTS[str(char_name).upper()]
+    if conv == "carbon":
+        ash_fraction = float(_resolve_ash_fraction(str(char_name), float(ash_fraction)))
+
+    rows = []
+    for yO2 in yO2_targets:
+        o2_label = f"{int(round(100*yO2))}%"
+        df_meas = linear_map.get(o2_label, None)
+
+        # base for simulation grid (use measured if available, else template)
+        df_base = df_meas if _valid_df(df_meas) else df_template
+
+        base = df_base.copy()
+        base["time_min"] = pd.to_numeric(base["time_min"], errors="coerce")
+        base["temp_C"] = pd.to_numeric(base["temp_C"], errors="coerce")
+        base["mass_pct"] = pd.to_numeric(base["mass_pct"], errors="coerce")
+        base = base.dropna(subset=["time_min", "temp_C", "mass_pct"]).sort_values("time_min")
+        if base.shape[0] < 10:
+            if debug:
+                print(f"[SIM-RAMP][SKIP] too few base points | {char_name} | yO2={yO2:.3f}")
+            continue
+
+        t_abs = base["time_min"].to_numpy(float)
+        t_rel = t_abs - float(t_abs[0])
+        T_pred = base["temp_C"].to_numpy(float)
+
+        # measured series if available
+        has_meas = _valid_df(df_meas)
+        if has_meas:
+            meas = df_meas.copy()
+            meas["temp_C"] = pd.to_numeric(meas["temp_C"], errors="coerce")
+            meas["mass_pct"] = pd.to_numeric(meas["mass_pct"], errors="coerce")
+            meas = meas.dropna(subset=["temp_C", "mass_pct"]).sort_values("temp_C")
+            T_meas = meas["temp_C"].to_numpy(float)
+            m_meas = meas["mass_pct"].to_numpy(float)
+        else:
+            T_meas = None
+            m_meas = None
+
+        # ---------- simulate + map ----------
+        if conv == "carbon":
+            # choose m0 from measured if available else from base
+            if has_meas and m_meas is not None and m_meas.size:
+                _, _, m0_top = _compute_Xc_and_w_from_mass(m_meas, ash_fraction=float(ash_fraction))
+            else:
+                _, _, m0_top = _compute_Xc_and_w_from_mass(base["mass_pct"].to_numpy(float), ash_fraction=float(ash_fraction))
+
+            X_pred = simulate_alpha_ramp(
+                time_min=t_rel,
+                temp_C=T_pred,
+                yO2=float(yO2),
+                E_A_J_per_mol=float(cr.E_A_J_per_mol),
+                A=float(cr.A),
+                m_o2=float(cr.m_o2),
+                solid_order=int(round(getattr(cr, "n_solid", 1))),
+                alpha0=0.0,
+            )
+
+            m_inf = float(m0_top) * float(ash_fraction)
+            m_pred = alpha_to_mass_pct(X_pred, m0=float(m0_top), m_inf=float(m_inf), loss=True)
+
+            if has_meas and m_meas is not None and m_meas.size:
+                X_meas, _, _ = _compute_Xc_and_w_from_mass(m_meas, ash_fraction=float(ash_fraction), m0_pct=float(m0_top))
+            else:
+                X_meas = None
+
+            conv_ylabel = r"Carbon conversion, $X_C$ (-)"
+            conv_pred_arr = X_pred
+            conv_meas_arr = X_meas
+
+        else:  # alpha
+            if has_meas and m_meas is not None and m_meas.size:
+                alpha_meas, _, m0_used, m_inf_used = _compute_alpha_w(m_meas)
+            else:
+                alpha_meas, _, m0_used, m_inf_used = _compute_alpha_w(base["mass_pct"].to_numpy(float))
+
+            X_pred = simulate_alpha_ramp(
+                time_min=t_rel,
+                temp_C=T_pred,
+                yO2=float(yO2),
+                E_A_J_per_mol=float(cr.E_A_J_per_mol),
+                A=float(cr.A),
+                m_o2=float(cr.m_o2),
+                solid_order=int(round(getattr(cr, "n_solid", 1))),
+                alpha0=0.0,
+            )
+            m_pred = alpha_to_mass_pct(X_pred, m0=float(m0_used), m_inf=float(m_inf_used), loss=True)
+
+            conv_pred_arr = X_pred
+            conv_meas_arr = alpha_meas if (has_meas and m_meas is not None and m_meas.size) else None
+            conv_ylabel = r"Conversion, $\alpha$ (-)"
+
+        # ---------- R^2 (interpolate pred onto meas grid if available) ----------
+        r2_mass = float("nan")
+        r2_conv = float("nan")
+
+        if has_meas and T_meas is not None and m_meas is not None and T_meas.size >= 5:
+            # sort pred for interpolation
+            op = np.argsort(T_pred)
+            Tp = T_pred[op]
+            mp = m_pred[op]
+            xp = conv_pred_arr[op]
+
+            m_pred_on_meas = np.interp(T_meas, Tp, mp)
+            x_pred_on_meas = np.interp(T_meas, Tp, xp)
+
+            r2_mass = r2_score_safe(m_meas, m_pred_on_meas)
+            if conv_meas_arr is not None:
+                r2_conv = r2_score_safe(conv_meas_arr, x_pred_on_meas)
+
+        # ---------- export ----------
+        stem = f"{str(char_name)}_linear_sim_yO2_{int(round(100*yO2))}pct_{conv}"
+        csv_path = out_dir / f"{stem}.csv"
+        fig_path = out_dir / f"{stem}.png"
+
+        out = pd.DataFrame({
+            "time_min": t_abs,
+            "time_rel_min": t_rel,
+            "temp_C": T_pred,
+            "mass_pred_pct": m_pred,
+            "conv_pred": conv_pred_arr,
+            "yO2_sim": float(yO2),
+            "r2_mass": float(r2_mass) if np.isfinite(r2_mass) else np.nan,
+            "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
+        })
+        if export_csv:
+            out.to_csv(csv_path, index=False)
+
+        if make_plots:
+            from matplotlib.lines import Line2D
+
+            fig, (axm, axx) = plt.subplots(2, 1, figsize=(7.4, 6.2), sharex=True)
+
+            if has_meas and T_meas is not None:
+                axm.plot(T_meas, m_meas, "-", label=f"measured ({o2_label})")
+            axm.plot(T_pred, m_pred, "--", label=f"CR-predicted (yO2={yO2:.2f})")
+            axm.set_ylabel("Mass (%)")
+            axm.set_title(f"{char_name} linear ramp | CR='{getattr(cr, 'label', '')}'")
+
+            # Legend + R2 in same box (upper right)
+            handles, labels = axm.get_legend_handles_labels()
+            handles += [
+                Line2D([], [], linestyle="none", label=rf"$R^2_{{mass}}$ = {fmt_r2(r2_mass)}"),
+                Line2D([], [], linestyle="none", label=rf"$R^2_{{conv}}$ = {fmt_r2(r2_conv)}"),
+            ]
+            axm.legend(
+                handles=handles,
+                loc="upper right",
+                frameon=True,
+                handlelength=2.0,
+                handletextpad=0.6,
+            )
+
+            if has_meas and T_meas is not None and conv_meas_arr is not None:
+                axx.plot(T_meas, conv_meas_arr, "-", label=f"measured ({o2_label})")
+            axx.plot(T_pred, conv_pred_arr, "--", label=f"CR-predicted (yO2={yO2:.2f})")
+            axx.set_xlabel(r"Temperature ($^\circ$C)")
+            axx.set_ylabel(conv_ylabel)
+            axx.legend(loc="best")
+
+            fig.tight_layout()
+            fig.savefig(fig_path, dpi=160, bbox_inches="tight")
+            plt.close(fig)
+
+        rows.append({
+            "char": str(char_name),
+            "yO2_sim": float(yO2),
+            "o2_label_meas_used": o2_label if has_meas else "",
+            "template_o2_label": str(template_o2_label),
+            "r2_mass": float(r2_mass) if np.isfinite(r2_mass) else np.nan,
+            "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
+            "csv_path": str(csv_path),
+            "fig_path": str(fig_path) if make_plots else "",
+        })
+
+    return pd.DataFrame(rows)
+

@@ -3,11 +3,13 @@ from pathlib import Path
 import pandas as pd
 import matplotlib
 
-from report_data_helper import run_char, _export_table, ReportConfig, plot_isothermal_matrix_feedstock_o2, create_tg_graphs_all
+from report_data_helper import run_char, _export_table, ReportConfig, plot_isothermal_matrix_feedstock_o2, \
+    create_tg_graphs_all
 
 matplotlib.use("Agg")
 from tg_loader import load_all_thermogravimetric_data, SPEC
 
+from tg_helpers import simulate_isothermal_holds_from_cr, plot_linear_ramp_overlays_from_cr
 
 # -------------------------
 # Paths
@@ -18,13 +20,12 @@ BASE_DIR = SIF_PATH  # <- change to ODIN_PATH if needed
 
 OUT_ROOT = Path("out")
 
-
 # -------------------------
 # Global analysis config
 # --------------------- ----
-RAMP_TIME_WINDOW = (32.0, 195.0)   # min
-BETA_K_PER_MIN = 3.0               # K/min (since your time axis is time_min)
-N_SOLID = 1.0                      # 1st order in solid assumption
+RAMP_TIME_WINDOW = (32.0, 195.0)  # min
+BETA_K_PER_MIN = 3.0  # K/min (since your time axis is time_min)
+N_SOLID = 1.0  # 1st order in solid assumption
 
 CR_WINDOWS = [
     ("CR_std_0p10_0p80", (0.10, 0.80)),
@@ -45,10 +46,9 @@ COMPARE_CFG = dict(
     trim_start_min=0.2,
     trim_end_min=0.2,
     debug=True,
-    skip_on_error= True,
+    skip_on_error=True,
     min_points_for_fit=20
 )
-
 
 DO_CR_FITS = True
 DO_CR_WINDOW_SENSITIVITY = True
@@ -59,7 +59,10 @@ DO_CREATE_TG_GRAPHS = True
 TG_GRAPH_CONVERSION_BASIS = "both"
 # 'overlay' (one fig per regime), 'separate' (one fig per regime+O2), or 'both'
 TG_GRAPH_FIGURE_MODE = "overlay"
-
+DO_SIM_HOLD_OVERLAYS = True
+SIM_HOLD_BASIS = ("carbon",)  # or ("carbon","alpha")
+DO_SIM_RAMP_OVERLAYS = True
+SIM_RAMP_YO2 = (0.05, 0.10, 0.20, 0.15)  # add whatever you want
 
 
 def main():
@@ -67,7 +70,6 @@ def main():
 
     data = load_all_thermogravimetric_data(BASE_DIR, SPEC)
 
-    # Bundle report settings to avoid circular imports
     cfg = ReportConfig(
         out_root=OUT_ROOT,
         cr_windows=CR_WINDOWS,
@@ -108,6 +110,60 @@ def main():
                 "ISO_r2": iso.r2,
             })
         summary_rows.append(row)
+
+        if DO_SIM_HOLD_OVERLAYS:
+            sim_root = OUT_ROOT / "hold_overlays" / str(char)
+            sim_root.mkdir(parents=True, exist_ok=True)
+
+            for basis in SIM_HOLD_BASIS:
+                sim_tbl = simulate_isothermal_holds_from_cr(
+                    cr_std,
+                    data[char],
+                    char_name=str(char),
+                    out_dir=sim_root / basis,
+                    temps_C=(225, 250),
+                    o2_labels=("5%", "10%", "20%"),
+                    conversion_basis=basis,
+
+                    tol_C=2.0,
+                    trim_start_min=float(COMPARE_CFG.get("trim_start_min", 0.2)),
+                    trim_end_min=float(COMPARE_CFG.get("trim_end_min", 0.2)),
+                    start_at_mass_peak=bool(COMPARE_CFG.get("start_at_mass_peak", True)),
+                    min_points=int(COMPARE_CFG.get("min_points_for_fit", 20)),
+
+                    enforce_common_conversion=bool(COMPARE_CFG.get("enforce_common_conversion", True)),
+                    common_hi_frac=float(COMPARE_CFG.get("common_hi_frac", 0.90)),
+                    min_common_hi=float(COMPARE_CFG.get("min_common_hi", 0.01)),
+                    common_per_temperature=bool(COMPARE_CFG.get("common_per_temperature", True)),
+
+                    # Full hold window for figures:
+                    use_common_window_for_curves=False,
+
+                    make_plots=True,
+                    export_csv=True,
+                    debug=bool(COMPARE_CFG.get("debug", False)),
+                )
+
+                if sim_tbl is not None and not sim_tbl.empty:
+                    sim_tbl.to_csv(sim_root / f"sim_hold_summary_{basis}.csv", index=False)
+
+        if DO_SIM_RAMP_OVERLAYS:
+            ramp_dir = OUT_ROOT / "ramp_overlays" / char
+            ramp_dir.mkdir(parents=True, exist_ok=True)
+
+            sim_tbl = plot_linear_ramp_overlays_from_cr(
+                cr_std,  # CR_std_0p10_0p80
+                data[char],
+                char_name=char,
+                out_dir=ramp_dir,
+                template_o2_label="10%",
+                yO2_targets=SIM_RAMP_YO2,
+                conversion_basis="carbon",
+                make_plots=True,
+                export_csv=True,
+                debug=True,
+            )
+            sim_tbl.to_csv(ramp_dir / "ramp_overlay_summary.csv", index=False)
 
     if summary_rows:
         df_summary = pd.DataFrame(summary_rows).sort_values("char").reset_index(drop=True)
