@@ -1539,7 +1539,7 @@ def plot_linear_ramp_overlays_from_cr(
             rmse_mass = float(np.sqrt(np.nanmean((m_meas - m_pred_on_meas) ** 2)))
             if conv_meas_arr is not None:
                 r2_conv = r2_score_safe(conv_meas_arr, x_pred_on_meas)
-                rmse_mass = float(np.sqrt(np.nanmean((m_meas - m_pred_on_meas) ** 2)))
+                rmse_conv = float(np.sqrt(np.nanmean((m_meas - m_pred_on_meas) ** 2)))
 
         # ---------- export ----------
         stem = f"{str(char_name)}_linear_sim_yO2_{int(round(100*yO2))}pct_{conv}"
