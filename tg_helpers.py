@@ -1524,6 +1524,7 @@ def plot_linear_ramp_overlays_from_cr(
         r2_conv = float("nan")
         rmse_mass = float("nan")
         rmse_conv = float("nan")
+        nrmse_mass = float("nan")
 
         if has_meas and T_meas is not None and m_meas is not None and T_meas.size >= 5:
             # sort pred for interpolation
@@ -1536,10 +1537,11 @@ def plot_linear_ramp_overlays_from_cr(
             x_pred_on_meas = np.interp(T_meas, Tp, xp)
 
             r2_mass = r2_score_safe(m_meas, m_pred_on_meas)
-            rmse_mass = float(np.sqrt(np.nanmean((m_meas - m_pred_on_meas) ** 2)))
+            rmse_mass = float(np.sqrt(np.nanmean((m_meas - m_pred_on_meas)**2)))
+            nrmse_mass = rmse_mass / (np.nanmax(m_meas) - np.nanmin(m_meas))
             if conv_meas_arr is not None:
                 r2_conv = r2_score_safe(conv_meas_arr, x_pred_on_meas)
-                rmse_conv = float(np.sqrt(np.nanmean((m_meas - m_pred_on_meas) ** 2)))
+                rmse_conv = float(np.sqrt(np.nanmean((conv_meas_arr - x_pred_on_meas)**2)))
 
         # ---------- export ----------
         stem = f"{str(char_name)}_linear_sim_yO2_{int(round(100*yO2))}pct_{conv}"
@@ -1557,6 +1559,7 @@ def plot_linear_ramp_overlays_from_cr(
             "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
             "rmse_mass_pct": rmse_mass,
             "rmse_conv": rmse_conv,
+            "nrmse_mass": nrmse_mass,
         })
         if export_csv:
             out.to_csv(csv_path, index=False)
@@ -1606,6 +1609,7 @@ def plot_linear_ramp_overlays_from_cr(
             "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
             "rmse_mass_pct": rmse_mass,
             "rmse_conv": rmse_conv,
+            "nrmse_mass": nrmse_mass,
             "csv_path": str(csv_path),
             "fig_path": str(fig_path) if make_plots else "",
         })
