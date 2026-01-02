@@ -137,9 +137,9 @@ def plot_arrhenius_groups(
 
     Notes
     -----
-    • This function *calls* `tg_math` to compute the fit (keeps math out of plotting).
+    • This function uses`tg_math` to compute the fit
     • No explicit colors are set; matplotlib will cycle defaults across groups.
-    • Units of A are the same time units used to compute r (your pipeline decides).
+    • Units of A are the same time units used to compute r
     """
 
     # Helper to coerce group item into (label, segments) tuple
@@ -171,7 +171,6 @@ def plot_arrhenius_groups(
             )
             continue
 
-        # Math should stay in tg_math for readability
         fit = estimate_arrhenius_from_segments(segs)
         # Scatter through group
         plt.plot(x, y, "o", label=f"{label} data")
@@ -295,8 +294,6 @@ def plot_coats_redfern_global(
 
     Saves to `save_path` if provided.
     """
-    import numpy as np
-    import matplotlib.pyplot as plt
 
     x = np.asarray(res_global.x_invT, dtype=float)
     y = np.asarray(res_global.y_ln_g_over_T2, dtype=float)

@@ -6,7 +6,6 @@ import pandas as pd
 import math
 import warnings
 
-
 R_DEFAULT = 8.314462618  # J/mol/K
 
 
@@ -207,9 +206,10 @@ ConversionBasis = Literal["alpha", "carbon"]
 
 ASH_FRACTION_DEFAULTS = {
     "BRF": 0.4008,
-    "WS":  0.1728,
-    "PW":  0.011463,
+    "WS": 0.1728,
+    "PW": 0.011463,
 }
+
 
 def _resolve_ash_fraction(feedstock: Optional[str], ash_fraction: Optional[float]) -> float:
     if ash_fraction is not None:
@@ -225,12 +225,13 @@ def _resolve_ash_fraction(feedstock: Optional[str], ash_fraction: Optional[float
         raise ValueError(f"ash_fraction must be in [0,1). Got {af}")
     return af
 
+
 def _compute_Xc_and_w_from_mass(
-    mass_pct: np.ndarray,
-    *,
-    ash_fraction: float,
-    m0_pct: Optional[float] = None,
-    eps: float = 1e-12,
+        mass_pct: np.ndarray,
+        *,
+        ash_fraction: float,
+        m0_pct: Optional[float] = None,
+        eps: float = 1e-12,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """
     Carbon conversion from raw mass% within the selected window:
@@ -251,14 +252,15 @@ def _compute_Xc_and_w_from_mass(
     w = np.clip(1.0 - Xc, eps, 1.0)  # avoid log(0)
     return Xc, w, float(m0_pct)
 
+
 def _compute_alpha_w(
-    mass_pct: np.ndarray,
-    *,
-    m0_pct: Optional[float] = None,
-    m_inf_pct: Optional[float] = None,
-    head_frac: float = 0.10,
-    tail_frac: float = 0.20,
-    eps: float = 1e-12,
+        mass_pct: np.ndarray,
+        *,
+        m0_pct: Optional[float] = None,
+        m_inf_pct: Optional[float] = None,
+        head_frac: float = 0.10,
+        tail_frac: float = 0.20,
+        eps: float = 1e-12,
 ) -> Tuple[np.ndarray, np.ndarray, float, float]:
     """
     Compute classic TG conversion alpha and remaining fraction w = 1 - alpha from a mass% window.
@@ -314,13 +316,13 @@ def _compute_alpha_w(
 
 
 def _compute_conversion_and_w(
-    mass_pct: np.ndarray,
-    *,
-    conversion_basis: ConversionBasis,
-    feedstock: Optional[str] = None,
-    ash_fraction: Optional[float] = None,
-    m0_pct: Optional[float] = None,
-    m_inf_pct: Optional[float] = None,
+        mass_pct: np.ndarray,
+        *,
+        conversion_basis: ConversionBasis,
+        feedstock: Optional[str] = None,
+        ash_fraction: Optional[float] = None,
+        m0_pct: Optional[float] = None,
+        m_inf_pct: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
     """
     Returns:
@@ -345,30 +347,29 @@ def _compute_conversion_and_w(
         raise ValueError(f"Unknown conversion_basis: {conversion_basis}")
 
 
-
 ####
 # Isothermal functions
 ####
 # Isothermal holds rate constant over the segment.
 def estimate_segment_rate_first_order(
-    df: pd.DataFrame,
-    *,
-    time_window: Tuple[float, float],
-    time_col: str = "time_min",
-    temp_col: str = "temp_C",
-    mass_col: str = "mass_pct",
-    label: Optional[str] = None,
-    # conversion handling
-    conversion_basis: ConversionBasis = "alpha",  # "alpha" or "carbon"
-    feedstock: Optional[str] = None,              # NEW: allows carbon basis via defaults BRF/WS/PW
-    ash_fraction: Optional[float] = None,         # still allowed (overrides feedstock default)
-    conversion_range: Optional[Tuple[float, float]] = None,  # overrides alpha_range if provided
-    alpha_range: Tuple[float, float] = (0.10, 0.80),
-    # robust reference points inside window
-    head_frac: float = 0.10,
-    tail_frac: float = 0.20,
-    # alpha normalization behavior
-    normalize_within_window: bool = False,
+        df: pd.DataFrame,
+        *,
+        time_window: Tuple[float, float],
+        time_col: str = "time_min",
+        temp_col: str = "temp_C",
+        mass_col: str = "mass_pct",
+        label: Optional[str] = None,
+        # conversion handling
+        conversion_basis: ConversionBasis = "alpha",  # "alpha" or "carbon"
+        feedstock: Optional[str] = None,
+        ash_fraction: Optional[float] = None,  # overrides feedstock default
+        conversion_range: Optional[Tuple[float, float]] = None,  # overrides alpha_range if not none
+        alpha_range: Tuple[float, float] = (0.10, 0.80),
+        # reference points inside window
+        head_frac: float = 0.10,
+        tail_frac: float = 0.20,
+        # alpha normalization behavior
+        normalize_within_window: bool = False,
 ) -> SegmentRate:
     """
     FIRST-ORDER (solid) isothermal estimation.
@@ -382,7 +383,7 @@ def estimate_segment_rate_first_order(
           w = m/m0_start (capped at 1), X = 1 − w
 
     conversion_basis="carbon":
-      m0 = max(mass%) inside the time window (always)
+      m0 = max(mass%) inside the time window
       Xc = (m0 − m)/(m0*(1-ash_fraction)), w = 1 − Xc
       ash_fraction can be passed explicitly or derived from feedstock.
 
@@ -450,10 +451,9 @@ def estimate_segment_rate_first_order(
             X = np.clip(1.0 - w, 0.0, 1.0)
 
     elif conversion_basis_s == "carbon":
-        # NEW: allow feedstock-based ash defaults
         af = _resolve_ash_fraction(feedstock, ash_fraction)
 
-        # IMPORTANT: m0 is highest point inside THIS time window
+        # m0 is highest point inside THIS time window
         m0_top = float(np.nanmax(m))
         if not np.isfinite(m0_top) or abs(m0_top) < eps:
             raise ValueError("Invalid m0_top in time window for carbon conversion.")
@@ -518,9 +518,6 @@ def estimate_segment_rate_first_order(
     )
 
 
-
-
-
 def estimate_arrhenius_from_segments(
         segments: Sequence[SegmentRate],
         *,
@@ -536,7 +533,7 @@ def estimate_arrhenius_from_segments(
         raise ValueError(f"Need at least {min_points} valid segments (got {T.size}).")
     x = 1.0 / T
     y = np.log(r)
-    slope, intercept, r2 = _linear_fit(x, y)  # y = intercept + slope*x
+    slope, intercept, r2 = _linear_fit(x, y)  # y = intercept + slope*x, change to np.polyfit?
     E_A = -slope * R
     A = float(math.exp(intercept)) if np.isfinite(intercept) else float("nan")
     raw = dict(E_A_raw=E_A, A_raw=A, slope_raw=slope, intercept_raw=intercept, r2_raw=r2)
@@ -571,7 +568,7 @@ def estimate_global_arrhenius_with_o2_from_segments(
         segments: list,
         o2_values: list[float],
         *,
-        # set this if you want to FORCE n=1 (or any fixed n)
+        # FORCE n=1 (or any fixed n)
         n_o2_fixed: float | None = None,
         # "fraction" uses y_O2 (0.05/0.10/0.20); "partial_pressure" uses p_O2 (e.g. bar)
         o2_basis: str = "fraction",
@@ -617,7 +614,7 @@ def estimate_global_arrhenius_with_o2_from_segments(
         p_ref = None
     else:
         # if user supplied fractions but wants pO2: need total_pressure
-        # here we assume o2_values already are pO2 in chosen units
+        # assume o2_values already are pO2 in chosen units
         ln_o2 = np.log(o2)
         p_ref = total_pressure
 
@@ -667,25 +664,25 @@ def estimate_global_arrhenius_with_o2_from_segments(
 
 #Convenience wrapper for above function
 def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
-    dfs: list[pd.DataFrame],
-    time_windows: list[tuple[float, float]],
-    o2_fractions: list[float],
-    *,
-    # Conversion filtering (applies inside estimate_segment_rate_first_order)
-    alpha_range: tuple[float, float] = (0.10, 0.60),                  # legacy name
-    conversion_range: Optional[Tuple[float, float]] = None,           # preferred
-    conversion_basis: ConversionBasis = "alpha",                      # "alpha" or "carbon"
-    feedstock: Optional[str] = None,
-    ash_fraction: Optional[float] = None,
+        dfs: list[pd.DataFrame],
+        time_windows: list[tuple[float, float]],
+        o2_fractions: list[float],
+        *,
+        # Conversion filtering (applies inside estimate_segment_rate_first_order)
+        alpha_range: tuple[float, float] = (0.10, 0.60),  # legacy
+        conversion_range: Optional[Tuple[float, float]] = None,  # preferred
+        conversion_basis: ConversionBasis = "alpha",  # "alpha" or "carbon"
+        feedstock: Optional[str] = None,
+        ash_fraction: Optional[float] = None,
 
-    # columns
-    time_col: str = "time_min",
-    mass_col: str = "mass_pct",
-    temp_col: str = "temp_C",
+        # columns
+        time_col: str = "time_min",
+        mass_col: str = "mass_pct",
+        temp_col: str = "temp_C",
 
-    # oxygen order handling
-    n_o2_fixed: float | None = None,                                  # fix m (gas order) if desired
-    label: str | None = None,
+        # oxygen order handling
+        n_o2_fixed: float | None = None,  # fix m (gas order) if desired
+        label: str | None = None,
 ) -> GlobalO2ArrheniusFit:
     """
     Global fit from multiple ISOTHERMAL datasets.
@@ -734,12 +731,12 @@ def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
             mass_col=mass_col,
             label=seg_label,
 
-            # NEW: pass conversion controls through
+            # pass conversion controls through
             conversion_basis=conversion_basis,
             feedstock=feedstock,
             ash_fraction=ash_fraction,
             conversion_range=conversion_range,
-            alpha_range=alpha_range,   # keep for backwards compatibility
+            alpha_range=alpha_range,  # keep for backwards compatibility
         )
         segments.append(seg)
 
@@ -752,40 +749,38 @@ def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
     )
 
 
-
 ####
 # Non-isothermal Coats-Redfern fits
 ####
 def estimate_global_coats_redfern_with_o2(
-    dfs: list[pd.DataFrame],
-    o2_fractions: list[float],
-    *,
-    time_window: tuple[float, float],
-    n_solid: float = 1.0,  # solid reaction order used in g(w)
-    alpha_range: tuple[float, float] = (0.10, 0.80),  # legacy name (used if conversion_range=None)
-    beta_fixed_K_per_time: float = 3.0,  # 3 K/min if time is minutes
-    # columns
-    time_col: str = "time_min",
-    temp_col: str = "temp_C",
-    mass_col: str = "mass_pct",
-    # alpha normalization parameters (within time_window)
-    head_frac: float = 0.10,
-    tail_frac: float = 0.20,
-    # NEW: alpha normalization behavior
-    # True  -> old behavior: alpha scaled by (m0 - m_inf) within the time_window (can force 0→1 inside window)
-    # False -> window-start mass is 100%: w = m/m0_start, X = 1-w (does NOT force 100% conversion)
-    normalize_within_window: bool = False,
-    # oxygen order handling
-    m_o2_fixed: float | None = None,  # set to 1.0 if you want to force O2 order
-    # fit options
-    equal_weight_per_dataset: bool = True,  # avoids runs with more points dominating
-    R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
-    label: str | None = None,
-    enforce_non_negative: bool = True,
-    conversion_basis: ConversionBasis = "alpha",  # "alpha" or "carbon"
-    feedstock: Optional[str] = None,
-    ash_fraction: Optional[float] = None,
-    conversion_range: Optional[Tuple[float, float]] = None,  # preferred over alpha_range
+        dfs: list[pd.DataFrame],
+        o2_fractions: list[float],
+        *,
+        time_window: tuple[float, float],
+        n_solid: float = 1.0,  # solid reaction order used in g(w)
+        alpha_range: tuple[float, float] = (0.10, 0.80),  # legacy  (used if conversion_range=None)
+        beta_fixed_K_per_time: float = 3.0,  # 3 K/mib
+        # columns
+        time_col: str = "time_min",
+        temp_col: str = "temp_C",
+        mass_col: str = "mass_pct",
+        # alpha normalization parameters (within time_window)
+        head_frac: float = 0.10,
+        tail_frac: float = 0.20,
+        # True  ->  alpha scaled by (m0 - m_inf) within the time_window (can force 0→1 inside window)
+        # False -> window-start mass is 100%: w = m/m0_start, X = 1-w (does NOT force 100% conversion)
+        normalize_within_window: bool = False,
+        # oxygen order handling
+        m_o2_fixed: float | None = None,  # set to 1.0 if you want to force O2 order
+        # fit options
+        equal_weight_per_dataset: bool = True,  # avoids runs with more points dominating
+        R: float = R_DEFAULT if "R_DEFAULT" in globals() else 8.314462618,
+        label: str | None = None,
+        enforce_non_negative: bool = True,
+        conversion_basis: ConversionBasis = "alpha",  # "alpha" or "carbon", base is alpha, carbon preferred
+        feedstock: Optional[str] = None,
+        ash_fraction: Optional[float] = None,
+        conversion_range: Optional[Tuple[float, float]] = None,  # preferred over alpha_range
 ):
     """
     Global Coats–Redfern fit across multiple linear-heating ramps at different O2 fractions.
@@ -823,7 +818,7 @@ def estimate_global_coats_redfern_with_o2(
     counts: list[int] = []
 
     # --------------------------
-    # FIT LOOP (with warnings)
+    # FIT LOOP
     # --------------------------
     for idx, (df, yO2) in enumerate(zip(dfs, o2_fractions), start=1):
         ds_id = f"{label or 'CR'} dataset #{idx} (O2={float(yO2):g})"
@@ -862,7 +857,7 @@ def estimate_global_coats_redfern_with_o2(
         # --- compute conversion X_conv and remaining fraction w = 1 - X_conv ---
         if conversion_basis == "alpha":
             if normalize_within_window:
-                # old behavior: scale by window span (can force X→1 by definition)
+                # scale by window span (can force X→1 by definition)
                 loss = (m_inf < m0_start)
                 if loss:
                     denom = (m0_start - m_inf)
@@ -879,19 +874,19 @@ def estimate_global_coats_redfern_with_o2(
                 w = np.clip(1.0 - X_conv, 1e-12, 1.0)
 
             else:
-                # requested behavior: 100% mass at window start, no scaling to 1 at window end
+                # 100% mass at window start, no scaling to 1 at window end
                 if not np.isfinite(m0_start) or abs(m0_start) < eps:
                     warnings.warn(f"{ds_id}: invalid m0_start, skipping.")
                     counts.append(0)
                     continue
                 w = m / m0_start
-                # if there is minor mass gain, cap at 1 -> X=0 there
+                # if there is minor mass gain, cap at 1 -> X=0 there - remove?
                 w = np.clip(w, 1e-12, np.inf)
                 w = np.minimum(w, 1.0)
                 X_conv = np.clip(1.0 - w, 0.0, 1.0)
 
         elif conversion_basis == "carbon":
-            # m0 for carbon conversion = highest mass% inside THIS time window (always)
+            # m0 for carbon conversion = highest mass% inside THIS time window
             af = _resolve_ash_fraction(feedstock, ash_fraction)
             m0_top = float(np.nanmax(m))
             if not np.isfinite(m0_top) or abs(m0_top) < eps:
@@ -934,9 +929,9 @@ def estimate_global_coats_redfern_with_o2(
             )
 
         mask = (
-            np.isfinite(T_K) & (T_K > 0) &
-            np.isfinite(X_conv) & (X_conv > lo_eff) & (X_conv < hi_eff) &
-            np.isfinite(w)
+                np.isfinite(T_K) & (T_K > 0) &
+                np.isfinite(X_conv) & (X_conv > lo_eff) & (X_conv < hi_eff) &
+                np.isfinite(w)
         )
         if int(np.sum(mask)) < 3:
             warnings.warn(f"{ds_id}: <3 points after conversion filtering, skipping.")
@@ -1026,7 +1021,7 @@ def estimate_global_coats_redfern_with_o2(
         A = 0.0
 
     # --------------------------
-    # Rebuild unweighted points for plotting (NO warnings)
+    # Rebuild unweighted points for plotting
     # --------------------------
     x_plot_list: list[np.ndarray] = []
     y_plot_list: list[np.ndarray] = []
@@ -1101,9 +1096,9 @@ def estimate_global_coats_redfern_with_o2(
             continue
 
         mask = (
-            np.isfinite(T_K) & (T_K > 0) &
-            np.isfinite(X_conv) & (X_conv > lo_eff) & (X_conv < hi_eff) &
-            np.isfinite(w)
+                np.isfinite(T_K) & (T_K > 0) &
+                np.isfinite(X_conv) & (X_conv > lo_eff) & (X_conv < hi_eff) &
+                np.isfinite(w)
         )
         if int(np.sum(mask)) < 3:
             continue
@@ -1135,7 +1130,7 @@ def estimate_global_coats_redfern_with_o2(
     return GlobalCR_O2_Result(
         label=label,
         n_solid=n_s,
-        alpha_range=(float(lo_req), float(hi_req)),  # kept for backwards compatibility
+        alpha_range=(float(lo_req), float(hi_req)), #alpha-range <=> conversion_range
         time_window=(float(t0), float(t1)),
         beta_K_per_time=float(beta_used),
         E_A_J_per_mol=float(E_A),
@@ -1238,19 +1233,20 @@ def alpha_to_mass_pct(alpha: np.ndarray, m0: float, m_inf: float, *, loss: bool 
     else:
         return m0 + a * (m_inf - m0)
 
+
 def compute_dtg_curve(
-    df: pd.DataFrame,
-    *,
-    time_window: tuple[float, float] | None = None,
-    time_col: str = "time_min",
-    temp_col: str = "temp_C",
-    mass_col: str = "mass_pct",
-    smooth_window: int = 0,
-    beta_min: float = 1e-6,
-    drop_invalid: bool = True,
+        df: pd.DataFrame,
+        *,
+        time_window: tuple[float, float] | None = None,
+        time_col: str = "time_min",
+        temp_col: str = "temp_C",
+        mass_col: str = "mass_pct",
+        smooth_window: int = 0,
+        beta_min: float = 1e-6,
+        drop_invalid: bool = True,
 ) -> pd.DataFrame:
     """
-    Compute DTG (derivative thermogravimetry) for a TG dataset.
+    Compute DTG for a TG dataset.
 
     Returns a DataFrame (time-ordered) with columns:
       - time_min
@@ -1268,8 +1264,6 @@ def compute_dtg_curve(
       - smooth_window (odd int recommended, e.g. 7, 11) applies a moving-average
         to mass and temperature *before* differentiation to reduce derivative noise.
     """
-    import numpy as np
-    import pandas as pd
 
     if time_window is not None:
         t0, t1 = time_window
@@ -1311,8 +1305,8 @@ def compute_dtg_curve(
         T = np.convolve(T_pad, kernel, mode="valid")
 
     # derivatives vs time
-    dm_dt = np.gradient(m, t)       # mass% / time
-    dT_dt = np.gradient(T, t)       # °C / time (heating rate)
+    dm_dt = np.gradient(m, t)  # mass% / time
+    dT_dt = np.gradient(T, t)  # °C / time (heating rate)
 
     # dm/dT via chain rule
     dm_dT = np.full_like(dm_dt, np.nan, dtype=float)
@@ -1338,7 +1332,6 @@ def compute_dtg_curve(
         out = out.dropna(subset=["dm_dT", "dtg_loss"]).reset_index(drop=True)
 
     return out
-
 
 
 ####

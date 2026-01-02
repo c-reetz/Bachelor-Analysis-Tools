@@ -8,7 +8,60 @@ from pandas import DataFrame
 import logging
 
 HEADER_MARKER = "##Temp./°C;Time/min;Mass/%;Segment"
-
+# Declarative spec: sample -> regime -> O2 label -> relative filepath (to base_dir)
+SPEC: Dict[str, Dict[str, Dict[str, str]]] = {
+    "BRF": {
+        "isothermal_225": {
+            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_BRF500.xlsx",
+            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_BRF500.xlsx",
+            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_BRF.xlsx",
+        },
+        "isothermal_250": {
+            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_BRF500.xlsx",
+            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_BRF500.xlsx",
+            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_BRF 500.xlsx",
+        },
+        "linear": {
+            "5%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_BRF500 5%.xlsx",
+            "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_BRF500.xlsx",
+            "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_BRF500.xlsx",
+        },
+    },
+    "WS": {
+        "isothermal_225": {
+            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_WS500.xlsx",
+            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_WS500.xlsx",
+            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_WS.xlsx",
+        },
+        "isothermal_250": {
+            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_WS500.xlsx",
+            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_WS500.xlsx",
+            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_WS500.xlsx",
+        },
+        "linear": {
+            "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_WS500.xlsx",
+            "10%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_WS500 10%.xlsx",
+            "20%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_WS500 20% O2.xlsx",
+        },
+    },
+    "PW": {
+        "isothermal_225": {
+            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_PW500.xlsx",
+            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_PW500.xlsx",
+            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_PW.xlsx",
+        },
+        "isothermal_250": {
+            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_PW500.xlsx",
+            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_pw500.xlsx",
+            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_PW500.xlsx",
+        },
+        "linear": {
+            "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_PW500.xlsx",
+            "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_PW500.xlsx",
+            "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_PW500.xlsx",
+        },
+    },
+}
 
 def _norm(s: str) -> str:
     if s is None or (isinstance(s, float) and pd.isna(s)):
@@ -16,7 +69,7 @@ def _norm(s: str) -> str:
     s = str(s).strip().lower()
     s = s.replace("°", "").replace("celsius", "c").replace("°c", "c")
     s = re.sub(r"[^a-z0-9]+", "", s)  # strip punctuation/spaces
-    # common compacting, e.g. "temp./c" -> "temp"
+    #  "temp./c" -> "temp"
     s = s.replace("tempc", "temp").replace("temp/c", "temp")
     return s
 
@@ -43,7 +96,7 @@ def _read_excel_tg(path: str) -> pd.DataFrame:
                 header_row, col_idx = i, has
                 break
         if header_row is None:
-            continue  # try next sheet
+            continue  #  next sheet
 
         data = raw.iloc[header_row + 1:, :].copy()
         df = pd.DataFrame({
@@ -53,7 +106,7 @@ def _read_excel_tg(path: str) -> pd.DataFrame:
             "segment": data.iloc[:, col_idx["segment"]],
         })
 
-        # numeric coercion (supports comma decimals)
+        # numeric coercion
         for c in ("temp_C", "time_min", "mass_pct"):
             s = df[c].astype(str).str.replace(",", ".", regex=False)
             df[c] = pd.to_numeric(s, errors="coerce")
@@ -145,61 +198,6 @@ def load_thermogravimetric_data(path: str | Path) -> pd.DataFrame:
         return _load_region_from_csv_text(text)
 
     raise ValueError(f"Unsupported file type: {ext}")
-
-# Declarative spec: sample -> regime -> O2 label -> relative filepath (to base_dir)
-SPEC: Dict[str, Dict[str, Dict[str, str]]] = {
-    "BRF": {
-        "isothermal_225": {
-            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_BRF500.xlsx",
-            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_BRF500.xlsx",
-            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_BRF.xlsx",
-        },
-        "isothermal_250": {
-            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_BRF500.xlsx",
-            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_BRF500.xlsx",
-            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_BRF 500.xlsx",
-        },
-        "linear": {
-            "5%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_BRF500 5%.xlsx",
-            "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_BRF500.xlsx",
-            "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_BRF500.xlsx",
-        },
-    },
-    "WS": {
-        "isothermal_225": {
-            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_WS500.xlsx",
-            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_WS500.xlsx",
-            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_WS.xlsx",
-        },
-        "isothermal_250": {
-            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_WS500.xlsx",
-            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_WS500.xlsx",
-            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_WS500.xlsx",
-        },
-        "linear": {
-            "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_WS500.xlsx",
-            "10%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_WS500 10%.xlsx",
-            "20%": "TG TEST 13 RERUNS AND RE-EXPORTS//ExpDat_WS500 20% O2.xlsx",
-        },
-    },
-    "PW": {
-        "isothermal_225": {
-            "5%": "TG TEST 9 - ISOTHERMAL 225C 5% O2/ExpDat_PW500.xlsx",
-            "10%": "TG TEST 10 - ISOTHERMAL 225C 10% O2/ExpDat_PW500.xlsx",
-            "20%": "TG TEST 4 - ISOTHERMAL 225C 20% O2/ExpDat_PW.xlsx",
-        },
-        "isothermal_250": {
-            "5%": "TG TEST 12 - ISOTHERMAL 250C 5% O2/ExpDat_PW500.xlsx",
-            "10%": "TG TEST 11 - ISOTHERMAL 250C 10% o2/ExpDat_pw500.xlsx",
-            "20%": "TG TEST 3 - ISOTHERMAL 250C 20% O2/ExpDat_PW500.xlsx",
-        },
-        "linear": {
-            "5%": "TG TEST 7 . OXIDATION 600C 5% O2/ExpDat_PW500.xlsx",
-            "10%": "TG TEST 6 - OXIDATION 600C 10% O2/ExpDat_PW500.xlsx",
-            "20%": "TG TEST 8 - OXIDATION 600C 20% O2/ExpDat_PW500.xlsx",
-        },
-    },
-}
 
 
 def load_all_thermogravimetric_data(

@@ -171,6 +171,13 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/out/ramp_overlays/WS/WS_linear_sim_yO2_5pct_carbon.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/ramp_overlays/WS/ramp_overlay_summary.csv">
           <value>
             <Attribute>
