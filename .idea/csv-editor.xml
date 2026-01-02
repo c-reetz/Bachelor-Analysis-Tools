@@ -150,6 +150,13 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/out/ramp_overlays/BRF/ramp_overlay_summary.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/ramp_overlays/PW/ramp_overlay_summary.csv">
           <value>
             <Attribute>

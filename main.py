@@ -2,13 +2,10 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 import matplotlib
-
 from report_data_helper import run_char, _export_table, ReportConfig, plot_isothermal_matrix_feedstock_o2, \
     create_tg_graphs_all
-
 matplotlib.use("Agg")
 from tg_loader import load_all_thermogravimetric_data, SPEC
-
 from tg_helpers import simulate_isothermal_holds_from_cr, plot_linear_ramp_overlays_from_cr
 
 # -------------------------
@@ -24,8 +21,8 @@ OUT_ROOT = Path("out")
 # Global analysis config
 # --------------------- ----
 RAMP_TIME_WINDOW = (32.0, 195.0)  # min
-BETA_K_PER_MIN = 3.0  # K/min (since your time axis is time_min)
-N_SOLID = 1.0  # 1st order in solid assumption
+BETA_K_PER_MIN = 3.0  # K/min
+N_SOLID = 1.0
 
 CR_WINDOWS = [
     ("CR_std_0p10_0p80", (0.10, 0.80)),

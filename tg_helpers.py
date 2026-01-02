@@ -1270,6 +1270,8 @@ def simulate_isothermal_holds_from_cr(
         # ---------- R^2 computed on what we actually plot ----------
         r2_mass = r2_score_safe(m_meas, m_pred)
         r2_conv = r2_score_safe(X_meas, X_pred)
+        rmse_mass = float(np.sqrt(np.nanmean((m_meas - m_pred) ** 2)))
+        rmse_conv = float(np.sqrt(np.nanmean((X_meas - X_pred) ** 2)))
 
         # ---------- export ----------
         stem = f"{c['char']}_{c['T_C']}C_{c['o2_label'].replace('%','pct')}"
@@ -1290,6 +1292,8 @@ def simulate_isothermal_holds_from_cr(
             "common_hi_used": float(common_hi_used),
             "r2_mass": float(r2_mass) if np.isfinite(r2_mass) else np.nan,
             "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
+            "rmse_mass_pct": rmse_mass,
+            "rmse_conv": rmse_conv,
             "src": c["src"],
         })
         if export_csv:
@@ -1342,6 +1346,8 @@ def simulate_isothermal_holds_from_cr(
             "common_hi_used": float(common_hi_used),
             "r2_mass": float(r2_mass) if np.isfinite(r2_mass) else np.nan,
             "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
+            "rmse_mass_pct": rmse_mass,
+            "rmse_conv": rmse_conv,
             "csv_path": str(csv_path),
             "fig_path": str(fig_path) if make_plots else "",
         })
@@ -1516,6 +1522,8 @@ def plot_linear_ramp_overlays_from_cr(
         # ---------- R^2 (interpolate pred onto meas grid if available) ----------
         r2_mass = float("nan")
         r2_conv = float("nan")
+        rmse_mass = float("nan")
+        rmse_conv = float("nan")
 
         if has_meas and T_meas is not None and m_meas is not None and T_meas.size >= 5:
             # sort pred for interpolation
@@ -1528,8 +1536,10 @@ def plot_linear_ramp_overlays_from_cr(
             x_pred_on_meas = np.interp(T_meas, Tp, xp)
 
             r2_mass = r2_score_safe(m_meas, m_pred_on_meas)
+            rmse_mass = float(np.sqrt(np.nanmean((m_meas - m_pred_on_meas) ** 2)))
             if conv_meas_arr is not None:
                 r2_conv = r2_score_safe(conv_meas_arr, x_pred_on_meas)
+                rmse_mass = float(np.sqrt(np.nanmean((m_meas - m_pred_on_meas) ** 2)))
 
         # ---------- export ----------
         stem = f"{str(char_name)}_linear_sim_yO2_{int(round(100*yO2))}pct_{conv}"
@@ -1545,6 +1555,8 @@ def plot_linear_ramp_overlays_from_cr(
             "yO2_sim": float(yO2),
             "r2_mass": float(r2_mass) if np.isfinite(r2_mass) else np.nan,
             "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
+            "rmse_mass_pct": rmse_mass,
+            "rmse_conv": rmse_conv,
         })
         if export_csv:
             out.to_csv(csv_path, index=False)
@@ -1592,6 +1604,8 @@ def plot_linear_ramp_overlays_from_cr(
             "template_o2_label": str(template_o2_label),
             "r2_mass": float(r2_mass) if np.isfinite(r2_mass) else np.nan,
             "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
+            "rmse_mass_pct": rmse_mass,
+            "rmse_conv": rmse_conv,
             "csv_path": str(csv_path),
             "fig_path": str(fig_path) if make_plots else "",
         })
