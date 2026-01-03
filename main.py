@@ -35,7 +35,7 @@ CR_WINDOWS = [
 
 COMPARE_CFG = dict(
     conversion_basis="carbon",
-    enforce_common_conversion=True,
+    enforce_common_conversion=False, # Compute only to common_hi (Lowest X_C for that feedstock and temperature decides)
     common_per_temperature=True,
     start_at_mass_peak=True,
     common_hi_frac=0.90,
