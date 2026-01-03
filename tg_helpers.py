@@ -1272,6 +1272,8 @@ def simulate_isothermal_holds_from_cr(
         r2_conv = r2_score_safe(X_meas, X_pred)
         rmse_mass = float(np.sqrt(np.nanmean((m_meas - m_pred) ** 2)))
         rmse_conv = float(np.sqrt(np.nanmean((X_meas - X_pred) ** 2)))
+        nrmse_mass = rmse_mass / (float(np.nanmax(m_meas)) - float(np.nanmin(m_meas))) if np.isfinite(rmse_mass) else float("nan")
+        nrmse_conv = rmse_conv / (float(np.nanmax(X_meas)) - float(np.nanmin(X_meas))) if np.isfinite(rmse_conv) else float("nan")
 
         # ---------- export ----------
         stem = f"{c['char']}_{c['T_C']}C_{c['o2_label'].replace('%','pct')}"
@@ -1294,6 +1296,8 @@ def simulate_isothermal_holds_from_cr(
             "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
             "rmse_mass_pct": rmse_mass,
             "rmse_conv": rmse_conv,
+            "nrmse_mass": nrmse_mass,
+            "nrmse_conv": nrmse_conv,
             "src": c["src"],
         })
         if export_csv:
@@ -1348,6 +1352,8 @@ def simulate_isothermal_holds_from_cr(
             "r2_conv": float(r2_conv) if np.isfinite(r2_conv) else np.nan,
             "rmse_mass_pct": rmse_mass,
             "rmse_conv": rmse_conv,
+            "nrmse_mass": nrmse_mass,
+            "nrmse_conv": nrmse_conv,
             "csv_path": str(csv_path),
             "fig_path": str(fig_path) if make_plots else "",
         })
@@ -1373,9 +1379,6 @@ def plot_linear_ramp_overlays_from_cr(
     Simulate full linear ramps using CR parameters and overlay measured vs predicted
     (mass + conversion vs temperature). Adds R^2 lines inside the TOP legend.
     """
-    from pathlib import Path
-    import numpy as np
-    import pandas as pd
 
     conv = str(conversion_basis).lower().strip()
     out_dir = Path(out_dir)

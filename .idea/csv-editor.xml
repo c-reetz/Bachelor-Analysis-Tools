@@ -143,7 +143,28 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/out/hold_overlays/BRF/carbon/sim_hold_BRF_225C_20pct_carbon.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/out/hold_overlays/BRF/sim_hold_summary_carbon.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/hold_overlays/PW/sim_hold_summary_carbon.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="/out/hold_overlays/WS/sim_hold_summary_carbon.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />
