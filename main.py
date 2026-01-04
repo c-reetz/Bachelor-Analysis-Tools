@@ -57,9 +57,9 @@ TG_GRAPH_CONVERSION_BASIS = "both"
 # 'overlay' (one fig per regime), 'separate' (one fig per regime+O2), or 'both'
 TG_GRAPH_FIGURE_MODE = "overlay"
 DO_SIM_HOLD_OVERLAYS = True
-SIM_HOLD_BASIS = ("carbon",)  # or ("carbon","alpha")
+SIM_HOLD_BASIS = ("carbon",)  # or ("carbon","alpha"), tuples work
 DO_SIM_RAMP_OVERLAYS = True
-SIM_RAMP_YO2 = (0.05, 0.10, 0.20, 0.15)  # add whatever you want
+SIM_RAMP_YO2 = (0.05, 0.10, 0.20, 0.15)  # 0.15 just to see if it looks ok
 
 
 def main():
@@ -173,7 +173,7 @@ def main():
             data,
             out_root=OUT_ROOT,
             conversion_basis=TG_GRAPH_CONVERSION_BASIS,
-            figure_mode=TG_GRAPH_FIGURE_MODE,  # <-- add this
+            figure_mode=TG_GRAPH_FIGURE_MODE,
             debug=COMPARE_CFG["debug"],
         )
 
