@@ -183,7 +183,6 @@ def compare_cr_to_char_isothermals(
 
             # infer time window
             try:
-                # If your infer function supports debug args, use them; otherwise fall back
                 try:
                     tw = infer_isothermal_time_window(
                         df,
@@ -192,7 +191,7 @@ def compare_cr_to_char_isothermals(
                         trim_start_min=trim_start_min,
                         trim_end_min=trim_end_min,
                         debug=bool(debug),
-                        debug_prefix=f"[CR↔ISO] {char_name} {regime_key} {o2_lab} ",
+                        debug_prefix=f"[CRISO] {char_name} {regime_key} {o2_lab} ",
                     )
                 except TypeError:
                     tw = infer_isothermal_time_window(
@@ -207,7 +206,7 @@ def compare_cr_to_char_isothermals(
                     tw = _refine_window_to_mass_peak(df, tw)
 
             except Exception as e:
-                msg = f"[CR↔ISO][SKIP] window inference failed | {char_name} | {regime_key} | {o2_lab} | src={src} | err={e}"
+                msg = f"[CRISO][SKIP] window inference failed | {char_name} | {regime_key} | {o2_lab} | src={src} | err={e}"
                 if debug:
                     print(msg)
                 if skip_on_error:
@@ -221,7 +220,7 @@ def compare_cr_to_char_isothermals(
                 dur = float(tw[1] - tw[0])
                 tmed = float(pd.to_numeric(sel["temp_C"], errors="coerce").median())
                 print(
-                    f"[CR↔ISO] cand | {regime_key} | {T_C}C | {o2_lab} | yO2={yO2:.3f} | "
+                    f"[CRISO] cand | {regime_key} | {T_C}C | {o2_lab} | yO2={yO2:.3f} | "
                     f"tw={tw} (dur={dur:.2f} min) | sel_n={len(sel)} | src={src} | Tmed={tmed:.2f}"
                 )
 
@@ -229,7 +228,7 @@ def compare_cr_to_char_isothermals(
 
     if not candidates:
         if debug:
-            print(f"[CR↔ISO] No isothermal candidates found for {char_name}. Keys={list(char_data.keys())}")
+            print(f"[CRISO] No isothermal candidates found for {char_name}. Keys={list(char_data.keys())}")
         return pd.DataFrame([])
 
     # ---- determine common conversion window(s) if requested ----
@@ -274,7 +273,7 @@ def compare_cr_to_char_isothermals(
                     common_hi_by_T[int(T_C)] = float(hi)
 
         if debug:
-            print(f"[CR↔ISO] common_hi_by_T({char_name}) = {common_hi_by_T}")
+            print(f"[CRISO] common_hi_by_T({char_name}) = {common_hi_by_T}")
 
         if not common_hi_by_T:
             raise ValueError("enforce_common_conversion=True but could not determine common_hi_by_T.")
@@ -289,7 +288,7 @@ def compare_cr_to_char_isothermals(
 
         if sel_n < int(min_points_for_fit):
             msg = (
-                f"[CR↔ISO][SKIP] Too few points | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
+                f"[CRISO][SKIP] Too few points | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
                 f"tw={tw} | sel_n={sel_n} | src={src}"
             )
             if debug:
@@ -329,7 +328,7 @@ def compare_cr_to_char_isothermals(
 
         except Exception as e:
             msg = (
-                f"[CR↔ISO][SKIP] rate fit failed | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
+                f"[CRISO][SKIP] rate fit failed | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
                 f"tw={tw} | sel_n={sel_n} | src={src} | err={e}"
             )
             if debug:
@@ -345,7 +344,7 @@ def compare_cr_to_char_isothermals(
 
         if debug:
             print(
-                f"[CR↔ISO] fit  | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
+                f"[CRISO] fit  | {char_name} | {regime_key} | {T_C}C | {o2_lab} | "
                 f"k_iso={k_iso:.3e} | k_CR={k_cr:.3e} | err%={(ratio-1)*100 if np.isfinite(ratio) else float('nan'):.2f} | src={src}"
             )
 
@@ -366,7 +365,7 @@ def compare_cr_to_char_isothermals(
 
     out = pd.DataFrame(rows)
     if debug:
-        print(f"[CR↔ISO] Done {char_name}: kept {len(out)} / {len(candidates)} candidates.\n")
+        print(f"[CRISO] Done {char_name}: kept {len(out)} / {len(candidates)} candidates.\n")
 
     if out.empty:
         return out
@@ -411,7 +410,7 @@ def infer_isothermal_time_window(
             return float("nan")
         return float(np.nanmax(tt) - np.nanmin(tt))
 
-    # ---- Segment-based selection (preferred if segment column exists) ----
+    # ---- Segment-based selection (preferred if segment column exists, which it should after re-exports) ----
     if seg_col in df.columns:
         best_seg = None
         best_score = None
@@ -424,9 +423,6 @@ def infer_isothermal_time_window(
 
             # build mask for this segment indices
             mask_seg = np.zeros(len(df), dtype=bool)
-            # indexes might not be 0..N-1; use position mask safely
-            # easiest: use .iloc positions by converting to positional indices
-            # If df has default RangeIndex, idx == positions; otherwise, map:
             try:
                 pos = df.index.get_indexer(idx)
                 mask_seg[pos[pos >= 0]] = True
@@ -909,7 +905,6 @@ def fit_isothermal_matrix_for_char_loaded(
     if not runs:
         raise ValueError(f"{char_label}: no isothermal runs found in char_data for temps={temps_C} and o2={o2_labels}")
 
-    # optionally compute an overlap conversion window (carbon-basis)
     conversion_range_used = conversion_range
     if enforce_common_conversion and conv == "carbon" and conversion_range_used is None:
         xmaxs = []
@@ -990,9 +985,6 @@ def fit_isothermal_matrix_for_char_loaded(
 
 
 def fit_isothermal_matrix_for_char(*args, **kwargs) -> dict:
-    """
-    Backward-compatible alias (your main.py calls this for BRF).
-    """
     return fit_isothermal_matrix_for_char_loaded(*args, **kwargs)
 
 def refine_window_to_mass_peak(
@@ -1054,7 +1046,7 @@ def simulate_isothermal_holds_from_cr(
 ):
     """
     Simulate and overlay isothermal holds: measured TG vs CR-predicted (mass + conversion).
-    Adds R^2_mass and R^2_conv as extra lines in the TOP legend (same location/box).
+    Adds R^2_mass and R^2_conv
 
     Writes:
       - sim_hold_<...>_<basis>.csv
@@ -1062,9 +1054,6 @@ def simulate_isothermal_holds_from_cr(
     Returns:
       - summary DataFrame with per-run R^2 fields
     """
-    from pathlib import Path
-    import numpy as np
-    import pandas as pd
 
     conv = str(conversion_basis).lower().strip()
     out_dir = Path(out_dir)

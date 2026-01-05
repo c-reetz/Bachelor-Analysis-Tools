@@ -75,7 +75,7 @@ def main():
         n_solid=N_SOLID,
         beta_k_per_min=BETA_K_PER_MIN,
         compare_cfg=COMPARE_CFG,
-        do_cr_fits=DO_CR_FITS,git add
+        do_cr_fits=DO_CR_FITS,
         do_cr_window_sensitivity=DO_CR_WINDOW_SENSITIVITY,
         do_cr_to_isothermal_tables_and_plots=DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS,
         do_isothermal_global_benchmark=DO_ISOTHERMAL_GLOBAL_BENCHMARK,
