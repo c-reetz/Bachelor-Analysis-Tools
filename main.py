@@ -2,7 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 import matplotlib
-from report_data_helper import run_char, _export_table, ReportConfig, plot_isothermal_matrix_feedstock_o2, \
+from report_data_helper import run_char, _export_table, ReportConfig, \
     create_tg_graphs_all, create_tg_plots_last_segment_all
 
 matplotlib.use("Agg")
@@ -14,7 +14,7 @@ from tg_helpers import simulate_isothermal_holds_from_cr, plot_linear_ramp_overl
 # -------------------------
 ODIN_PATH = Path("./TG_Data/Odin Data/")
 SIF_PATH = Path("./TG_Data/Sif Data/")
-BASE_DIR = SIF_PATH  # <- change to ODIN_PATH if needed
+BASE_DIR = SIF_PATH
 
 OUT_ROOT = Path("out")
 
@@ -75,7 +75,7 @@ def main():
         n_solid=N_SOLID,
         beta_k_per_min=BETA_K_PER_MIN,
         compare_cfg=COMPARE_CFG,
-        do_cr_fits=DO_CR_FITS,
+        do_cr_fits=DO_CR_FITS,git add
         do_cr_window_sensitivity=DO_CR_WINDOW_SENSITIVITY,
         do_cr_to_isothermal_tables_and_plots=DO_CR_TO_ISOTHERMAL_TABLES_AND_PLOTS,
         do_isothermal_global_benchmark=DO_ISOTHERMAL_GLOBAL_BENCHMARK,

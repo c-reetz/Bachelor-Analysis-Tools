@@ -147,7 +147,6 @@ def _linear_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
     Returns (slope, intercept, r2).
     """
 
-    # Ensure we're working with 1D float arrays (copies if needed)
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
 
@@ -164,7 +163,6 @@ def _linear_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
     # Sample means of x and y: x̄, ȳ
     xm, ym = x.mean(), y.mean()
 
-    # Centered sums used by OLS:
     # Sxx = Σ (xi - x̄)^2   — variation of x
     # Sxy = Σ (xi - x̄)(yi - ȳ) — covariance term between x and y
     Sxx = ((x - xm) ** 2).sum()
@@ -174,7 +172,6 @@ def _linear_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
     if Sxx == 0:
         return (math.nan, math.nan, math.nan)
 
-    # OLS closed-form estimators:
     # slope = Sxy / Sxx
     # intercept = ȳ - slope * x̄
     slope = Sxy / Sxx
@@ -194,7 +191,6 @@ def _linear_fit(x: np.ndarray, y: np.ndarray) -> Tuple[float, float, float]:
     # y has no variance (all equal), so R^2 is undefined.
     r2 = 1.0 - ss_res / ss_tot if ss_tot != 0 else math.nan
 
-    # Return as plain floats
     return float(slope), float(intercept), float(r2)
 
 
@@ -276,7 +272,6 @@ def _compute_alpha_w(
         w = alpha.copy()
         return alpha, w, float("nan"), float("nan")
 
-    # robust m0/m_inf from head/tail if not supplied
     N = m.size
     k_head = max(3, int(round(head_frac * N)))
     k_tail = max(3, int(round(tail_frac * N)))
@@ -301,7 +296,7 @@ def _compute_alpha_w(
     alpha_win = np.clip(alpha_win, 0.0, 1.0)
     w_win = np.clip(1.0 - alpha_win, eps, 1.0)
 
-    # map back to original shape (including any NaNs that were removed)
+    # map
     alpha = np.asarray(mass_pct, dtype=float)
     w = np.asarray(mass_pct, dtype=float)
 
@@ -367,7 +362,7 @@ def estimate_segment_rate_first_order(
         alpha_range: Tuple[float, float] = (0.10, 0.80),
         # reference points inside window
         head_frac: float = 0.10,
-        tail_frac: float = 0.20,
+        tail_frac: float = 0.10,
         # alpha normalization behavior
         normalize_within_window: bool = False,
 ) -> SegmentRate:
@@ -387,7 +382,6 @@ def estimate_segment_rate_first_order(
       Xc = (m0 − m)/(m0*(1-ash_fraction)), w = 1 − Xc
       ash_fraction can be passed explicitly or derived from feedstock.
 
-    Safeguards:
       - If requested conversion_range is not covered -> raises ValueError
       - If partially covered -> warns and clips to overlap
     """
@@ -613,8 +607,7 @@ def estimate_global_arrhenius_with_o2_from_segments(
         ln_o2 = np.log(o2)  # dimensionless
         p_ref = None
     else:
-        # if user supplied fractions but wants pO2: need total_pressure
-        # assume o2_values already are pO2 in chosen units
+        # supplied fractions but wants pO2: need total_pressure
         ln_o2 = np.log(o2)
         p_ref = total_pressure
 
@@ -668,7 +661,6 @@ def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
         time_windows: list[tuple[float, float]],
         o2_fractions: list[float],
         *,
-        # Conversion filtering (applies inside estimate_segment_rate_first_order)
         alpha_range: tuple[float, float] = (0.10, 0.60),  # legacy
         conversion_range: Optional[Tuple[float, float]] = None,  # preferred
         conversion_basis: ConversionBasis = "alpha",  # "alpha" or "carbon"
@@ -698,7 +690,7 @@ def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
              ln(k) = ln(A) + n*ln(O2) - Ea/R * (1/T)
 
          If all O2 fractions are the same, the n*ln(O2) term is constant and folds into ln(A)
-         (you still get Ea correctly; A becomes an apparent A').
+         (Ea should still be calculated correctly; A becomes an apparent A').
 
     Parameters:
       - dfs, time_windows, o2_fractions must have same length.
@@ -713,7 +705,6 @@ def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
     if len(dfs) < 2:
         raise ValueError("Need at least 2 isothermal datasets (3 recommended) to estimate Ea reliably.")
 
-    # Basic validation of O2 inputs
     for y in o2_fractions:
         if not (np.isfinite(y) and y > 0):
             raise ValueError("All o2_fractions must be finite and > 0.")
@@ -731,12 +722,11 @@ def estimate_global_arrhenius_with_o2_from_isothermal_datasets(
             mass_col=mass_col,
             label=seg_label,
 
-            # pass conversion controls through
             conversion_basis=conversion_basis,
             feedstock=feedstock,
             ash_fraction=ash_fraction,
             conversion_range=conversion_range,
-            alpha_range=alpha_range,  # keep for backwards compatibility
+            alpha_range=alpha_range,
         )
         segments.append(seg)
 
