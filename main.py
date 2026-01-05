@@ -3,7 +3,8 @@ from pathlib import Path
 import pandas as pd
 import matplotlib
 from report_data_helper import run_char, _export_table, ReportConfig, plot_isothermal_matrix_feedstock_o2, \
-    create_tg_graphs_all
+    create_tg_graphs_all, create_tg_plots_last_segment_all
+
 matplotlib.use("Agg")
 from tg_loader import load_all_thermogravimetric_data, SPEC
 from tg_helpers import simulate_isothermal_holds_from_cr, plot_linear_ramp_overlays_from_cr
@@ -175,6 +176,13 @@ def main():
             conversion_basis=TG_GRAPH_CONVERSION_BASIS,
             figure_mode=TG_GRAPH_FIGURE_MODE,
             debug=COMPARE_CFG["debug"],
+        )
+
+        create_tg_plots_last_segment_all(
+            data,
+            out_root=OUT_ROOT,
+            m0_mode="start",
+            t0_mode="start",
         )
 
 

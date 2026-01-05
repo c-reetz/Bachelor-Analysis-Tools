@@ -23,7 +23,7 @@ from tg_helpers import (
     fit_isothermal_global_from_char_data,
     compare_cr_vs_isothermal_global_on_isothermals, format_global_cr_o2_result,
 )
-from tg_plotting import plot_global_coats_redfern_o2_fit
+from tg_plotting import plot_global_coats_redfern_o2_fit, plot_tg_curve_time
 
 
 @dataclass
@@ -1447,3 +1447,63 @@ def create_tg_graphs_all(
                 print(f"[TG-BASICS][ERROR] {char}: {e}")
             out[str(char)] = {"error": str(e)}
     return out
+
+def _safe_name(s: str) -> str:
+    s = s.replace("%", "pct")
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+    return s.strip("_")
+
+
+def _last_segment_value(df: pd.DataFrame, seg_col: str = "segment") -> int | None:
+    if seg_col not in df.columns:
+        return None
+    seg = pd.to_numeric(df[seg_col], errors="coerce").dropna()
+    if seg.empty:
+        return None
+    return int(seg.max())
+
+
+def create_tg_plots_last_segment_all(
+    data: dict,
+    *,
+    out_root: str | Path,
+    m0_mode: str = "start",  # "start" keeps initial point at 100%; "max" caps at 100%
+    t0_mode: str = "start",  # "start" makes time_rel=0 at segment start
+):
+    out_root = Path(out_root) / "tg_plots_last_segment"
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    for char, char_data in (data or {}).items():
+        if not isinstance(char_data, dict):
+            continue
+
+        for regime, o2_map in (char_data or {}).items():
+            if not isinstance(o2_map, dict):
+                continue
+
+            for o2_lab, df in (o2_map or {}).items():
+                if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+                    continue
+
+                last_seg = _last_segment_value(df)
+                if last_seg is None:
+                    continue
+
+                save_dir = out_root / _safe_name(str(char)) / _safe_name(str(regime))
+                save_dir.mkdir(parents=True, exist_ok=True)
+
+                fname = f"{char}__{regime}__{o2_lab}__seg{last_seg}.png"
+                save_path = save_dir / _safe_name(fname)
+
+                plot_tg_curve_time(
+                    df,
+                    segment=last_seg,          # <-- THIS is the “full last segment”
+                    m0_mode=m0_mode,
+                    t0_mode=t0_mode,
+                    label=f"{o2_lab} (seg {last_seg})",
+                    title=f"{char} | {regime} | {o2_lab} | segment {last_seg}",
+                    show=False,
+                    save_path=str(save_path),
+                )
+
+    print(f"[TG] Saved last-segment TG plots to: {out_root.resolve()}")
